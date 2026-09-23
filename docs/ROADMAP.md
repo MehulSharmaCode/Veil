@@ -5,6 +5,11 @@ Real privacy-preserving agent loop on DOM-accessible content: snapshot → IR �
 gate → hosted LLM planner → local validation/taint/confirmation → local resolution → execution → verification.
 Milestones M1–M8 are tracked in `PROGRESS.md`.
 
+Status: M1–M4 done; M5/M6 built; the full loop (M7) has not run with a real LLM yet.
+- **Next (1a):** replace the Anthropic planner provider with a free provider (likely Groq). Only the server provider
+  layer changes; the schemas, privacy boundary and extension are unchanged. Details are in `PROGRESS.md` → "Next session".
+- **Then (1b):** M7 live run + manual checklist + leak check, then M8 polish.
+
 ## 2. Real-website compatibility
 In order: controlled demo site → simple generic external site (harmless form) → dynamic React site → more complex sites.
 Log problems in: React/controlled inputs, dynamic DOM, iframes & shadow DOM, unusual a11y markup, unstable ids, async
