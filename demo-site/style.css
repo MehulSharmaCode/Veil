@@ -1,0 +1,32 @@
+* { box-sizing: border-box; }
+body { margin: 0; font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; color: #1d2433; background: #f3f5f9; }
+.topbar { display: flex; flex-wrap: wrap; align-items: center; gap: 16px 32px; padding: 12px 28px; background: #16325c; color: #fff; }
+.brand { font-weight: 700; }
+.brand span { font-weight: 400; opacity: 0.8; margin-left: 6px; }
+.topbar nav { display: flex; gap: 18px; }
+.topbar nav a { color: #cfe0ff; text-decoration: none; }
+.topbar nav a[aria-current="page"] { color: #fff; border-bottom: 2px solid #ffc947; }
+.signed-in { margin: 0 0 0 auto; font-size: 14px; opacity: 0.9; }
+.layout { display: grid; grid-template-columns: 240px 1fr; gap: 28px; max-width: 1080px; margin: 28px auto; padding: 0 20px; }
+.side { background: #fff; border-radius: 10px; padding: 20px; height: fit-content; }
+.avatar { border-radius: 50%; display: block; margin-bottom: 12px; }
+.muted { color: #5b6477; font-size: 14px; margin: 4px 0; }
+.help { font-size: 14px; color: #5b6477; }
+.content { background: #fff; border-radius: 10px; padding: 24px 28px; }
+h1 { margin-top: 0; }
+.lead { color: #5b6477; }
+fieldset { border: 1px solid #e1e5ee; border-radius: 8px; padding: 12px 18px 4px; margin: 0 0 18px; }
+legend { font-weight: 600; padding: 0 6px; }
+.field { display: grid; gap: 4px; margin-bottom: 14px; }
+label { font-weight: 600; font-size: 14px; }
+input, textarea { font: inherit; padding: 8px 10px; border: 1px solid #c5ccd9; border-radius: 6px; width: 100%; max-width: 480px; }
+input:focus, textarea:focus { outline: 2px solid #3b6fd8; border-color: transparent; }
+.hint { color: #6b7385; font-size: 12.5px; }
+.actions { display: flex; gap: 10px; }
+button { font: inherit; padding: 8px 18px; border-radius: 6px; border: 1px solid #c5ccd9; background: #fff; cursor: pointer; }
+button.primary { background: #16325c; color: #fff; border-color: #16325c; }
+.status { margin-top: 14px; padding: 10px 12px; border-radius: 6px; }
+.status.ok { background: #e6f6ea; color: #1b6b2f; }
+.status.error { background: #fdecec; color: #9b1c1c; }
+.foot { text-align: center; color: #8a92a3; font-size: 13px; padding: 20px; }
+@media (max-width: 760px) { .layout { grid-template-columns: 1fr; } }

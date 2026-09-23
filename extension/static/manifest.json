@@ -1,0 +1,22 @@
+{
+  "manifest_version": 3,
+  "name": "VEIL — Privacy-Preserving Browser Agent",
+  "short_name": "VEIL",
+  "version": "0.1.0",
+  "description": "Performs web tasks without sending your sensitive data to any server.",
+  "minimum_chrome_version": "116",
+  "permissions": ["sidePanel", "activeTab", "scripting"],
+  "host_permissions": ["http://localhost/*", "http://127.0.0.1/*"],
+  "background": { "service_worker": "service-worker.js" },
+  "side_panel": { "default_path": "sidepanel.html" },
+  "action": { "default_title": "Open VEIL" },
+  "icons": { "128": "icon128.png" },
+  "content_scripts": [
+    {
+      "matches": ["http://localhost/*", "http://127.0.0.1/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ]
+}

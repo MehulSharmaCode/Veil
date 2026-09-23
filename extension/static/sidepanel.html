@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VEIL</title>
+  <link rel="stylesheet" href="sidepanel.css" />
+</head>
+<body>
+  <header class="top">
+    <div class="brand"><span class="logo">◐</span> VEIL <small>v0.1</small></div>
+    <div id="health" class="pill pill-muted" title="Backend status">backend: …</div>
+  </header>
+
+  <section class="card">
+    <label for="task" class="lbl">Task</label>
+    <textarea id="task" rows="4" placeholder="e.g. Fill my email and address. Do not submit."></textarea>
+    <div class="row">
+      <button id="start" class="btn primary">Start</button>
+      <button id="stop" class="btn danger" disabled>Stop</button>
+    </div>
+    <div id="sanitizedTask" class="mono small hidden" aria-live="polite"></div>
+  </section>
+
+  <section class="card">
+    <div class="row between">
+      <span class="lbl">Stage</span>
+      <span id="stage" class="pill">idle</span>
+    </div>
+    <div id="stageDetail" class="small muted"></div>
+    <div class="row between top-gap">
+      <span class="lbl">Vault (local, in-memory)</span>
+      <span id="vaultCount" class="pill pill-muted">0</span>
+    </div>
+    <ul id="vaultList" class="plain mono small"></ul>
+  </section>
+
+  <section id="prompt" class="card attention hidden" aria-live="assertive">
+    <div id="promptTitle" class="strong"></div>
+    <ul id="promptReasons" class="small"></ul>
+    <textarea id="promptInput" rows="2" class="hidden" placeholder="Your answer (sanitized before it is sent)"></textarea>
+    <div class="row">
+      <button id="promptYes" class="btn primary">Allow</button>
+      <button id="promptNo" class="btn">Deny</button>
+    </div>
+  </section>
+
+  <section class="card">
+    <div class="lbl">Step log <small class="muted">(placeholders only)</small></div>
+    <ol id="log" class="log small"></ol>
+  </section>
+
+  <details class="card">
+    <summary class="lbl">Debug: sanitized IR (local only)</summary>
+    <div class="row top-gap">
+      <button id="snapNow" class="btn small">Snapshot current tab</button>
+    </div>
+    <pre id="debug" class="mono small debug"></pre>
+  </details>
+
+  <script src="sidepanel.js"></script>
+</body>
+</html>

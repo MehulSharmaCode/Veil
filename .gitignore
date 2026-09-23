@@ -1,0 +1,8 @@
+node_modules/
+extension/dist/
+server/.venv/
+server/.env
+server/logs/
+__pycache__/
+.pytest_cache/
+.DS_Store

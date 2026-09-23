@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Edit profile · Sahyadri Institute Student Portal</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="topbar">
+    <div class="brand">Sahyadri Institute of Technology <span>Student Portal</span></div>
+    <nav>
+      <a href="#dashboard">Dashboard</a>
+      <a href="#courses">Courses</a>
+      <a href="#fees">Fees</a>
+      <a href="#profile" aria-current="page">Profile</a>
+    </nav>
+    <p class="signed-in">Signed in as <strong>Rahul Sharma</strong> (rahul.sharma@example.test)</p>
+  </header>
+
+  <main class="layout">
+    <aside class="side">
+      <img src="avatar.svg" width="96" height="96" alt="Profile photo" class="avatar" />
+      <p class="muted">Application No: APP-26-K7Q4</p>
+      <p class="muted">Programme: B.Tech Computer Engineering, Year 3</p>
+      <h3>Need help?</h3>
+      <p class="help">Changes to your name must match your admission documents. Contact the registrar's office for corrections.</p>
+    </aside>
+
+    <section class="content">
+      <h1>Edit profile</h1>
+      <p class="lead">Keep your contact details up to date so the institute can reach you about exams and results.</p>
+
+      <form id="profile-form" aria-label="Edit profile" novalidate>
+        <fieldset>
+          <legend>Personal details</legend>
+          <div class="field">
+            <label for="fullName">Full name</label>
+            <input id="fullName" name="fullName" type="text" autocomplete="name" value="Rahul Sharma" required />
+          </div>
+          <div class="field">
+            <label for="pan">PAN</label>
+            <input id="pan" name="pan" type="text" value="ABCPS1234K" maxlength="10" />
+            <small class="hint">10 characters, as printed on your PAN card.</small>
+          </div>
+        </fieldset>
+
+        <fieldset>
+          <legend>Contact details</legend>
+          <div class="field">
+            <label for="email">Email</label>
+            <input id="email" name="email" type="email" autocomplete="email" placeholder="name@example.com" />
+          </div>
+          <div class="field">
+            <label for="phone">Phone</label>
+            <input id="phone" name="phone" type="tel" autocomplete="tel" value="98765 43210" />
+          </div>
+          <div class="field">
+            <label for="altEmail">Alternate email</label>
+            <!-- Controlled input: its value lives in app.js state and is re-rendered from it. -->
+            <input id="altEmail" name="altEmail" type="text" />
+            <small class="hint">Optional. Used only if your primary email bounces.</small>
+          </div>
+          <div class="field">
+            <label for="address">Address</label>
+            <textarea id="address" name="address" rows="3" autocomplete="street-address"></textarea>
+            <small class="hint">Postal address for mailing hall tickets.</small>
+          </div>
+        </fieldset>
+
+        <div class="actions">
+          <button type="submit" class="primary">Save changes</button>
+          <button type="button" id="resetBtn">Discard edits</button>
+        </div>
+        <p id="status" role="status" class="status" hidden></p>
+      </form>
+    </section>
+  </main>
+
+  <footer class="foot">© 2026 Sahyadri Institute of Technology · Demo fixture for VEIL testing</footer>
+  <script src="app.js"></script>
+</body>
+</html>

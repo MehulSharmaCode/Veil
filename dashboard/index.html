@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>VEIL Observatory</title>
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+  <header class="hdr">
+    <div>
+      <div class="title">VEIL <span>observatory</span></div>
+      <div class="sub">Read-only view of real VEIL events. Everything shown here already passed the extension's egress gate: placeholders and categories only.</div>
+    </div>
+    <div class="hdr-right">
+      <span id="conn" class="badge muted">connecting…</span>
+      <span id="privacy" class="badge muted" title="Egress gate results for planner payloads">egress: –</span>
+    </div>
+  </header>
+
+  <section class="panel wide">
+    <h2>Current task <small id="session" class="muted"></small></h2>
+    <div id="task" class="task mono">No task yet. Start one from the VEIL side panel.</div>
+    <ol id="stages" class="stages"></ol>
+  </section>
+
+  <main class="grid">
+    <section class="panel">
+      <h2>DOM / IR summary</h2>
+      <dl id="ir" class="kv"></dl>
+      <div id="regions" class="small muted"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Detected categories</h2>
+      <div id="categories" class="chips"></div>
+      <h2 class="gap">Vault <small class="muted">(in the extension's memory)</small></h2>
+      <div id="vaultStatus" class="small"></div>
+      <table class="tbl"><thead><tr><th>Placeholder</th><th>Category</th><th>Source</th><th>Value</th></tr></thead><tbody id="placeholders"></tbody></table>
+    </section>
+
+    <section class="panel">
+      <h2>Egress gate</h2>
+      <div id="egress" class="small"></div>
+      <h2 class="gap">LLM action</h2>
+      <div id="llm" class="mono small"></div>
+    </section>
+
+    <section class="panel">
+      <h2>Local validation</h2>
+      <div id="validation" class="small"></div>
+      <h2 class="gap">Execution &amp; verification</h2>
+      <div id="execution" class="small"></div>
+    </section>
+
+    <section class="panel wide">
+      <h2>Sanitized outbound payload <small class="muted">(exactly as it crossed the egress boundary)</small></h2>
+      <pre id="payload" class="mono payload">–</pre>
+    </section>
+
+    <section class="panel wide">
+      <h2>Live event timeline</h2>
+      <ol id="timeline" class="timeline"></ol>
+    </section>
+  </main>
+
+  <script src="registry.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
