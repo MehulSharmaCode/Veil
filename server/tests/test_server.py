@@ -1,5 +1,5 @@
 """Server tests. `ScriptedTestProvider` is a TEST-ONLY stub; it is never reachable from the runtime path
-(create_app only builds AnthropicProvider unless a provider is injected by a test)."""
+(create_app only builds GroqProvider unless a provider is injected by a test)."""
 
 from __future__ import annotations
 

@@ -2,6 +2,5 @@ fastapi>=0.141
 uvicorn>=0.53
 pydantic>=2.13
 python-dotenv>=1.2
-anthropic>=1.8
-httpx>=0.28  # FastAPI TestClient
+httpx>=0.28  # Groq planner API client + FastAPI TestClient
 pytest>=9.1

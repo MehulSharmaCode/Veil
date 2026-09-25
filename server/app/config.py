@@ -8,13 +8,15 @@ from pathlib import Path
 
 from dotenv import load_dotenv
 
+DEFAULT_MODEL = "openai/gpt-oss-20b"
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 load_dotenv(SERVER_DIR / ".env")
 
 
 @dataclass(frozen=True)
 class Settings:
-    anthropic_api_key: str
+    groq_api_key: str
     model: str
     effort: str
     log_payloads: bool
@@ -23,13 +25,13 @@ class Settings:
 
     @property
     def planner_configured(self) -> bool:
-        return bool(self.anthropic_api_key)
+        return bool(self.groq_api_key)
 
 
 def load_settings() -> Settings:
     return Settings(
-        anthropic_api_key=os.getenv("ANTHROPIC_API_KEY", "").strip(),
-        model=os.getenv("VEIL_MODEL", "claude-sonnet-5").strip() or "claude-sonnet-5",
+        groq_api_key=os.getenv("GROQ_API_KEY", "").strip(),
+        model=os.getenv("VEIL_MODEL", DEFAULT_MODEL).strip() or DEFAULT_MODEL,
         effort=os.getenv("VEIL_EFFORT", "medium").strip() or "medium",
         log_payloads=os.getenv("VEIL_DEV_LOG_PAYLOADS", "1") == "1",
         payload_log_path=SERVER_DIR / "logs" / "received_payloads.jsonl",
