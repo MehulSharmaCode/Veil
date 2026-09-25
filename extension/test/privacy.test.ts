@@ -105,6 +105,22 @@ describe('detectors', () => {
     expect(cats('Shivajinagar Road 411005')).toEqual(['ADDRESS']);
     expect(cats('Order total 411005')).toEqual([]);
   });
+  it('a cue-less address is masked whole around its PIN, not just the PIN', () => {
+    const spansOf = (raw: string) => {
+      const t = normalizeText(raw);
+      return detect(t).map((x) => [x.category, t.slice(x.start, x.end)]);
+    };
+    // e.g. an ask_user answer: no "my address" cue, only the PIN is address evidence
+    expect(spansOf('12 MG Road, Shivajinagar, Pune 411005')).toEqual([['ADDRESS', '12 MG Road, Shivajinagar, Pune 411005']]);
+    expect(spansOf('flat 4b, sai apartments, near city mall, pune 411005')).toEqual([['ADDRESS', 'flat 4b, sai apartments, near city mall, pune 411005']]);
+    // stops at instruction words, labels, sentence ends and other PII; continues past the PIN
+    expect(spansOf('Fill my email and address 12 MG Road, Pune 411005 please')).toEqual([['ADDRESS', '12 MG Road, Pune 411005']]);
+    expect(spansOf('Thanks. No. 4, M.G. Road, Pune 411005, Maharashtra. Do not submit.')).toEqual([['ADDRESS', 'No. 4, M.G. Road, Pune 411005, Maharashtra']]);
+    expect(spansOf('Office: 5 Main Road, Pune 411001 Phone: 98765 43210')).toEqual([
+      ['ADDRESS', '5 Main Road, Pune 411001'],
+      ['PHONE', '98765 43210'],
+    ]);
+  });
   it('name cues', () => {
     const t = normalizeText('Signed in as Rahul Sharma (rahul.sharma@example.test)');
     expect(detect(t).map((s) => [s.category, t.slice(s.start, s.end)])).toEqual([
@@ -129,6 +145,14 @@ describe('sanitizer + vault', () => {
     expect(vault.getEntry('[ADDRESS_1]')!.value).toBe('12 MG Road, Shivajinagar, Pune 411005');
     expect(vault.getEntry('[EMAIL_1]')!.source).toBe('task');
   });
+  it('masks a bare address given as a user answer entirely and vaults the full value', () => {
+    const vault = new Vault();
+    const s = new Sanitizer(vault);
+    const out = s.sanitize('12 MG Road, Shivajinagar, Pune 411005', { source: 'user_answer', origin: 'http://localhost:8080' });
+    expect(out).toBe('[ADDRESS_1]');
+    expect(vault.getEntry('[ADDRESS_1]')!.value).toBe('12 MG Road, Shivajinagar, Pune 411005');
+  });
+
   it('reuses the same placeholder for the same normalized value across task and page', () => {
     const { vault, s } = mk();
     expect(s.sanitize('email Mehul.Test@Example.com', task)).toBe('email [EMAIL_1]');

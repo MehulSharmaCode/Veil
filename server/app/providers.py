@@ -3,6 +3,8 @@ Test stubs live in tests/ only."""
 
 from __future__ import annotations
 
+import copy
+import json
 import logging
 import time
 from dataclasses import dataclass
@@ -93,7 +95,10 @@ class GroqProvider:
         }
 
     def complete_json(self, system: str, turns: list[ChatTurn], schema: dict[str, Any]) -> str:
-        body = self._body(system, turns, schema)
+        wire_schema, merged = adapt_schema_for_groq(schema)
+        return restore_merged_variants(self._request(self._body(system, turns, wire_schema)), merged)
+
+    def _request(self, body: dict[str, Any]) -> str:
         deadline = self._clock() + self.call_budget_s
         last_error = "Could not reach the LLM provider"
 
@@ -160,6 +165,95 @@ class GroqProvider:
         if not isinstance(content, str) or not content.strip():
             raise ProviderError("The model returned no text output")
         return content
+
+
+def _discriminator(variant: Any) -> str | None:
+    """The single `type` value of an object variant (`{"type": {"enum": [v]}}`), if it has one."""
+    if not isinstance(variant, dict) or variant.get("type") != "object":
+        return None
+    enum = (variant.get("properties") or {}).get("type", {}).get("enum")
+    return enum[0] if isinstance(enum, list) and len(enum) == 1 else None
+
+
+def _nullable(s: dict[str, Any]) -> dict[str, Any]:
+    out = copy.deepcopy(s)
+    if isinstance(out.get("type"), str):
+        out["type"] = [out["type"], "null"]
+    else:
+        return {"anyOf": [out, {"type": "null"}]}
+    if "enum" in out:
+        out["enum"] = [*out["enum"], None]
+    return out
+
+
+def adapt_schema_for_groq(schema: dict[str, Any]) -> tuple[dict[str, Any], dict[str, set[str]]]:
+    """Groq strict mode rejects `anyOf` object variants that share a discriminator value (observed:
+    HTTP 400 "anyOf disambiguation failed: overlapping discriminator value"). Merge such variants into
+    one whose non-shared properties are nullable (still required, as strict mode demands). Returns the
+    wire schema and, per merged discriminator value, the nullable keys so outputs can be mapped back.
+    The canonical schema is not modified."""
+    merged: dict[str, set[str]] = {}
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if not isinstance(node, dict):
+            return node
+        out = {k: walk(v) for k, v in node.items()}
+        variants = out.get("anyOf")
+        if isinstance(variants, list):
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for v in variants:
+                d = _discriminator(v)
+                if d is not None:
+                    groups.setdefault(d, []).append(v)
+            new_variants: list[Any] = []
+            for v in variants:
+                d = _discriminator(v)
+                if d is None or len(groups[d]) == 1:
+                    new_variants.append(v)
+                elif v is groups[d][0]:
+                    new_variants.append(_merge(d, groups[d], merged))
+            out["anyOf"] = new_variants
+        return out
+
+    return walk(schema), merged
+
+
+def _merge(d: str, group: list[dict[str, Any]], merged: dict[str, set[str]]) -> dict[str, Any]:
+    props: dict[str, Any] = {}
+    for v in group:
+        for k, s in v["properties"].items():
+            if k in props and props[k] != s:
+                raise ValueError(f"cannot merge '{d}' variants: conflicting definitions of '{k}'")
+            props[k] = s
+    shared = set.intersection(*(set(v["properties"]) for v in group))
+    nullable = set(props) - shared
+    merged[d] = nullable
+    props = {k: (_nullable(s) if k in nullable else s) for k, s in props.items()}
+    return {"type": "object", "properties": props, "required": list(props), "additionalProperties": False}
+
+
+def restore_merged_variants(raw: str, merged: dict[str, set[str]]) -> str:
+    """Inverse of adapt_schema_for_groq on the output: drop the null placeholders of merged variants so
+    the canonical validators (pydantic here, zod in the extension) judge the canonical shape. Anything
+    that is not valid JSON is returned unchanged (the planner's repair path handles it)."""
+    if not merged:
+        return raw
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return raw
+
+    def walk(node: Any) -> Any:
+        if isinstance(node, list):
+            return [walk(v) for v in node]
+        if not isinstance(node, dict):
+            return node
+        keys = merged.get(node.get("type")) if isinstance(node.get("type"), str) else None
+        return {k: walk(v) for k, v in node.items() if not (keys and k in keys and v is None)}
+
+    return json.dumps(walk(data), ensure_ascii=False)
 
 
 def _retry_after(r: httpx.Response) -> float | None:

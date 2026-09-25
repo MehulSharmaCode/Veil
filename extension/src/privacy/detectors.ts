@@ -2,7 +2,8 @@
 //
 // Known limitations (documented, v0.1): no NER; names are only found via context cues
 // ("my name is", "signed in as", "Name:", greetings); addresses only via cues ("my address",
-// "address:", "residing at") or a 6-digit PIN next to address words; numbers are classified by
+// "address:", "residing at") or a 6-digit PIN next to address words (then grown to the surrounding
+// address tokens, so a cue-less address is masked whole); numbers are classified by
 // length/prefix/checksum, so an unusual phone format may be masked as [REDACTED_TEXT] instead
 // of [PHONE_n]; obfuscated emails ("name at domain dot com") are not detected.
 
@@ -167,9 +168,67 @@ export function detectPinCodes(t: string): Span[] {
   const out: Span[] = [];
   for (const m of t.matchAll(/(?<![A-Za-z0-9])[1-9]\d{2}\s?\d{3}(?![A-Za-z0-9])/g)) {
     const window = t.slice(Math.max(0, m.index! - 48), m.index!);
-    if (PIN_WORDS.test(window)) out.push({ start: m.index!, end: m.index! + m[0].length, category: 'ADDRESS', detector: 'cue:pincode' });
+    if (!PIN_WORDS.test(window)) continue;
+    const [start, end] = addressExtent(t, m.index!, m.index! + m[0].length);
+    out.push({ start, end, category: 'ADDRESS', detector: 'cue:pincode' });
   }
   return out;
+}
+
+/**
+ * Words that end an address when growing it outward from a PIN code: instruction/function words and
+ * field labels. Everything else between boundaries is treated as part of the address (fail closed:
+ * a cue-less address such as an ask_user answer "12 X Road, Y, City 411005" is masked whole, not
+ * just its PIN).
+ */
+const ADDRESS_STOP = new Set([
+  'and', 'but', 'then', 'also', 'plus', 'or', 'my', 'the', 'please', 'do', 'dont', "don't", 'not', 'fill', 'enter',
+  'type', 'put', 'set', 'use', 'with', 'to', 'into', 'for', 'is', 'are', 'it', 'this', 'that', 'of', 'me', 'your',
+  'our', 'here', 'as', 'at', 'from', 'submit', 'save', 'click', 'address', 'email', 'e-mail', 'phone', 'mobile',
+  'tel', 'fax', 'name', 'pan', 'aadhaar', 'dob', 'id',
+]);
+
+/** A token that cannot be part of an address, or ends it (label colon, sentence end, other PII). */
+function addressStops(tok: string): boolean {
+  const core = tok.replace(/^[("'[]+/, '').replace(/[,)"'\]]+$/, '');
+  if (!core) return false; // punctuation-only token (e.g. "-") stays inside the address
+  if (/^[;!?:]/.test(core) || core.includes('@') || /^\[[A-Z_0-9]+\]$/.test(core)) return true;
+  if (digitsOnly(core).length >= 7) return true; // phone / id-like numbers are detected separately
+  return ADDRESS_STOP.has(core.replace(/[.:;!?]+$/, '').toLowerCase());
+}
+
+/** True if the token ends a sentence/clause: ";", "!", "?", ":" or "." after a non-abbreviation. */
+function endsClause(tok: string): boolean {
+  const core = tok.replace(/[,)"'\]]+$/, '');
+  if (/[;!?:]$/.test(core)) return true;
+  if (!core.endsWith('.')) return false;
+  const word = /([A-Za-z0-9]+)\.$/.exec(core)?.[1] ?? '';
+  return !(/^[A-Za-z]$/.test(word) || ABBREVIATIONS.has(word.toLowerCase()));
+}
+
+/** Grow an address span from its PIN code to the surrounding address tokens on the same line/clause. */
+function addressExtent(t: string, pinStart: number, pinEnd: number): [number, number] {
+  let start = pinStart;
+  const before = [...t.slice(0, pinStart).matchAll(/\S+/g)];
+  for (let i = before.length - 1; i >= 0; i--) {
+    const m = before[i]!;
+    const tokEnd = m.index! + m[0].length;
+    if (t.slice(tokEnd, start).includes('\n') || endsClause(m[0]) || addressStops(m[0])) break;
+    start = m.index!;
+  }
+  let end = pinEnd;
+  const re = /\S+/g;
+  re.lastIndex = pinEnd;
+  for (let m = re.exec(t); m; m = re.exec(t)) {
+    const tok = m[0];
+    if (t.slice(end, m.index).includes('\n') || /^[.;!?:]/.test(tok) || addressStops(tok)) break;
+    if (endsClause(tok)) {
+      end = m.index + tok.replace(/[,)"'\]]+$/, '').length - 1; // drop the terminating punctuation
+      break;
+    }
+    end = m.index + tok.length;
+  }
+  return trimSpan(t, start, end);
 }
 
 const NAME_TOKEN = /^[A-Za-z][A-Za-z'.-]*$/;

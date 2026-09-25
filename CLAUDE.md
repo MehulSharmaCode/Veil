@@ -2,8 +2,14 @@
 
 SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-weight Browser Agents**.
 
-> **Start here in a new session:** read `docs/PROGRESS.md` → "Next session" first. Current blocker: the real LLM
-> planner call has **never been executed**. Tomorrow's task is to replace the Anthropic provider with a free one (likely Groq).
+> **Start here in a new session:** read `docs/PROGRESS.md` → "Next session" first.
+> - **Status:** Phase 1 was verified **headless** on the demo site on 2026-09-25. That is the real DOM loop through a
+>   hosted planner (Groq `openai/gpt-oss-20b`, effort `medium`).
+> - **Privacy bug:** one was found and fixed that day (a partially masked address was sent to the planner). See
+>   "Security incident 2026-09-25 (resolved)" in PROGRESS.
+> - **Next:** the manual non-headless side-panel checklist (Stop, panel close, dashboard), then `make leaks`, then the
+>   user freezes and commits Phase 1, then the next phase is discussed.
+> - **Do not start OCR/vision or other new features on your own.**
 
 VEIL is a Chrome MV3 extension that performs web tasks for a user ("fill my email and address, don't submit")
 without sending the user's sensitive data to any server. The extension reads the page locally, replaces sensitive
@@ -68,7 +74,8 @@ side panel (orchestrator, owns vault)            content script (top frame, loca
 - `schemas.py` (pydantic mirror of the extension schemas, `extra="forbid"`).
 - `prompt.py` (`SYSTEM_PROMPT`, `build_user_message` with `<untrusted_page_data>`, `RESPONSE_SCHEMA`).
 - `planner.py` (validate, then one repair, then 502).
-- `providers.py` (`PlannerProvider` protocol + `AnthropicProvider`; **the seam for the provider swap**).
+- `providers.py` (`PlannerProvider` protocol + `GroqProvider`; **the provider seam**; bounded timeout/retry budget;
+  provider-local strict-schema adaptation).
 - `config.py` (`.env`).
 - `telemetry.py` (relay).
 
@@ -106,7 +113,7 @@ DOM-only private agent loop, end to end, for real. Actions: `click`, `type`, `se
 
 ```sh
 make setup       # npm install, server/.venv + requirements, copies .env.example → server/.env if missing
-# put the planner API key in server/.env yourself (currently ANTHROPIC_API_KEY; see PROGRESS "Next session")
+# put the planner API key in server/.env yourself (GROQ_API_KEY; model/effort via VEIL_MODEL/VEIL_EFFORT)
 
 make dev         # builds extension, then server :8000 + demo :8080 + dashboard :8090 (Ctrl-C stops all)
 make ext         # rebuild extension → extension/dist   (make ext-watch; static/ copied only at start)

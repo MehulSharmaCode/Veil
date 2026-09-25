@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import copy
 import json
 from pathlib import Path
 from typing import Any, Callable
@@ -15,7 +16,7 @@ from app.config import Settings
 from app.main import create_app
 from app.planner import PlanningFailed, plan
 from app.prompt import RESPONSE_SCHEMA, SYSTEM_PROMPT
-from app.providers import CALL_BUDGET_S, GROQ_CHAT_URL, ChatTurn, GroqProvider, ProviderError
+from app.providers import CALL_BUDGET_S, GROQ_CHAT_URL, ChatTurn, GroqProvider, ProviderError, adapt_schema_for_groq
 from app.schemas import PlannerPayload
 
 from test_server import GOOD, VALID_PAYLOAD
@@ -99,24 +100,80 @@ def test_request_uses_strict_json_schema_and_effort() -> None:
     assert body["model"] == "openai/gpt-oss-20b"
     assert body["reasoning_effort"] == "medium"
     assert body["stream"] is False
-    assert body["response_format"] == {"type": "json_schema", "json_schema": {"name": "veil_plan", "strict": True, "schema": RESPONSE_SCHEMA}}
+    wire_schema, _ = adapt_schema_for_groq(RESPONSE_SCHEMA)
+    assert body["response_format"] == {"type": "json_schema", "json_schema": {"name": "veil_plan", "strict": True, "schema": wire_schema}}
     assert body["messages"] == [{"role": "system", "content": SYSTEM_PROMPT}, {"role": "user", "content": "hello"}]
 
 
-def test_schema_meets_strict_mode_rules() -> None:
-    # Groq strict mode: every object lists all properties as required and sets additionalProperties false.
+def test_wire_schema_meets_strict_mode_rules() -> None:
+    # Groq strict mode: every object lists all properties as required and sets additionalProperties false,
+    # and anyOf object variants must have distinct discriminator values (a real API 400 otherwise).
+    wire_schema, _ = adapt_schema_for_groq(RESPONSE_SCHEMA)
+
     def walk(node: Any) -> None:
         if isinstance(node, dict):
             if node.get("type") == "object":
                 assert node["additionalProperties"] is False
                 assert sorted(node["required"]) == sorted(node["properties"])
+            if "anyOf" in node:
+                tags = [v["properties"]["type"]["enum"][0] for v in node["anyOf"] if v.get("type") == "object"]
+                assert len(tags) == len(set(tags)), tags
             for v in node.values():
                 walk(v)
         elif isinstance(node, list):
             for v in node:
                 walk(v)
 
-    walk(RESPONSE_SCHEMA)
+    walk(wire_schema)
+
+
+def test_adaptation_merges_only_overlapping_variants_and_keeps_canonical_schema() -> None:
+    before = copy.deepcopy(RESPONSE_SCHEMA)
+    wire_schema, merged = adapt_schema_for_groq(RESPONSE_SCHEMA)
+    assert RESPONSE_SCHEMA == before  # canonical contract untouched
+    assert merged == {"scroll": {"direction", "amount_px", "target"}}
+    variants = wire_schema["properties"]["actions"]["items"]["anyOf"]
+    canonical = RESPONSE_SCHEMA["properties"]["actions"]["items"]["anyOf"]
+    assert [v["properties"]["type"]["enum"][0] for v in variants] == ["click", "type", "select", "scroll", "wait", "ask_user", "done"]
+    assert [v for v in variants if v["properties"]["type"]["enum"] != ["scroll"]] == [v for v in canonical if v["properties"]["type"]["enum"] != ["scroll"]]
+    scroll = variants[3]["properties"]
+    assert scroll["target"] == {"type": ["string", "null"]}
+    assert scroll["amount_px"] == {"type": ["integer", "null"]}
+    assert scroll["direction"] == {"type": ["string", "null"], "enum": ["up", "down", None]}
+
+
+def plan_with_output(action: dict[str, Any], then: str | None = None) -> Any:
+    outputs = [json.dumps({"status": "continue", "actions": [action], "message": "m"})] + ([then] if then else [])
+    p, seen, _ = make(lambda r: httpx.Response(200, json=completion(outputs.pop(0))))
+    return plan(PlannerPayload.model_validate(VALID_PAYLOAD), p), seen
+
+
+@pytest.mark.parametrize(
+    "wire, canonical",
+    [
+        ({"type": "scroll", "direction": None, "amount_px": None, "target": "e4"}, {"type": "scroll", "target": "e4"}),
+        ({"type": "scroll", "direction": "down", "amount_px": 600, "target": None}, {"type": "scroll", "direction": "down", "amount_px": 600}),
+    ],
+)
+def test_merged_scroll_output_maps_back_to_canonical_action(wire: dict[str, Any], canonical: dict[str, Any]) -> None:
+    result, seen = plan_with_output(wire)
+    assert len(seen) == 1
+    assert result.actions[0].model_dump() == canonical
+
+
+@pytest.mark.parametrize(
+    "wire",
+    [
+        {"type": "scroll", "direction": None, "amount_px": None, "target": None},  # neither form
+        {"type": "scroll", "direction": "down", "amount_px": 600, "target": "e4"},  # both forms
+        {"type": "scroll", "direction": "down", "amount_px": None, "target": None},  # incomplete scroll-by
+        {"type": "click", "target": None},  # nulls are only dropped for merged variants
+    ],
+)
+def test_invalid_merged_outputs_still_rejected_by_canonical_validation(wire: dict[str, Any]) -> None:
+    result, seen = plan_with_output(wire, then=GOOD)
+    assert len(seen) == 2  # rejected -> one repair attempt
+    assert result.actions[0].type == "type"
 
 
 def test_plan_through_groq_returns_validated_action() -> None:

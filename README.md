@@ -9,9 +9,20 @@ and verifies the result.
 
 Built for SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-weight Browser Agents**.
 
-> **Status: v0.1 (DOM-only).** Everything up to and including the planner boundary (`POST /plan`) has been verified in
-> real Chrome. **The live hosted-LLM planner call has never run.** No LLM-chosen action has been executed yet, so the
-> complete *LLM → action → browser* loop is **not** demonstrated. See [Current limitations](#current-limitations).
+> **Status: v0.1 (DOM-only), Phase 1 demonstrated.** On the controlled demo site, in headless Chrome, a real hosted
+> planner (Groq, `openai/gpt-oss-20b`) has driven:
+> - a single-action task;
+> - a multi-step task, including `ask_user`;
+> - a Save attempt that local confirmation blocked.
+>
+> Each action was validated locally, executed in the page and verified.
+>
+> One privacy bug was found and fixed during those runs: a partially masked address was sent to the planner (see
+> [Privacy incident log](#privacy-incident-log)). After the fix, the real-provider leak check found 0 of 9 known
+> synthetic values.
+>
+> Still outstanding: a short manual (non-headless) side-panel checklist. No external websites are supported. See
+> [Current limitations](#current-limitations).
 
 ---
 
@@ -136,9 +147,17 @@ same egress gate as planner requests, so it shows placeholders, categories and c
 - **`/telemetry/*`:** an in-memory relay on a separate router (`POST /events`, `GET /state`, SSE `GET /stream`).
   CORS allows `GET` from the dashboard origin only.
 
-The LLM provider sits behind the `PlannerProvider` protocol in `server/app/providers.py`. v0.1 ships an
-`AnthropicProvider`. The provider only ever receives the gate-checked sanitized payload, so swapping providers does
-not move the privacy boundary.
+The LLM provider sits behind the `PlannerProvider` protocol in `server/app/providers.py`. The current implementation is
+`GroqProvider`:
+- It calls Groq's chat-completions REST API with `httpx`, using strict JSON Schema structured output and a
+  configurable reasoning effort.
+- Time is bounded: 20 s per HTTP attempt, 25 s per call, at most 3 attempts. With the one repair call, a `/plan`
+  request therefore finishes before the extension's 60 s deadline.
+- Groq's strict mode rejects `anyOf` variants that share a `type` value, so the provider merges the two `scroll`
+  variants for the request and maps the output back. The canonical schema and validators are unchanged.
+
+The provider only ever receives the gate-checked sanitized payload, so swapping providers does not move the privacy
+boundary.
 
 ---
 
@@ -227,7 +246,7 @@ Veil/
 │   │   ├── schemas.py         #   pydantic mirror of the extension schemas (extra="forbid")
 │   │   ├── prompt.py          #   system prompt, <untrusted_page_data> framing, response JSON schema
 │   │   ├── planner.py         #   validate → one repair → 502
-│   │   ├── providers.py       #   PlannerProvider protocol + AnthropicProvider (the provider seam)
+│   │   ├── providers.py       #   PlannerProvider protocol + GroqProvider (the provider seam)
 │   │   ├── config.py          #   settings from server/.env
 │   │   └── telemetry.py       #   in-memory telemetry relay + SSE
 │   ├── tests/                 # pytest (includes a test-only scripted provider)
@@ -261,8 +280,8 @@ Veil/
 Notes:
 - The Makefile and run instructions are written for **macOS**, and the E2E driver defaults to the macOS Chrome path.
   Override it with the `CHROME` environment variable on other systems. Other platforms have not been tested.
-- A hosted LLM API key is needed only for the live planner, which is currently **not working** (see below).
-  Everything else runs without one.
+- A **Groq API key** (console.groq.com) is needed for the live planner. The free tier works, but see the rate-limit
+  note under [Current limitations](#current-limitations). Everything except planning runs without a key.
 
 ---
 
@@ -294,14 +313,14 @@ key in the extension.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `ANTHROPIC_API_KEY` | *(empty)* | Planner key for the current `AnthropicProvider`. If empty, no provider is built: `/health` reports `planner_configured: false` and `/plan` returns 503. |
-| `VEIL_MODEL` | `claude-sonnet-5` | Planner model name. |
-| `VEIL_EFFORT` | `medium` | `low` \| `medium` \| `high`. |
+| `GROQ_API_KEY` | *(empty)* | Groq API key for `GroqProvider`. If empty, no provider is built: `/health` reports `planner_configured: false` and `/plan` returns 503. |
+| `VEIL_MODEL` | `openai/gpt-oss-20b` | Groq model id. It must support strict JSON Schema output. |
+| `VEIL_EFFORT` | `medium` | Reasoning effort: `low` \| `medium` \| `high`. |
 | `VEIL_DEV_LOG_PAYLOADS` | `1` | Dev only: append each received `/plan` payload to `server/logs/received_payloads.jsonl` (used by the leak check). |
 | `VEIL_DASHBOARD_ORIGIN` | `http://localhost:8090,http://127.0.0.1:8090` | Origins allowed by CORS (dashboard GETs). |
 
-> The project plans to replace the Anthropic provider with a free one (likely Groq). The variable names above may
-> change when that happens. See [Next development phase](#next-development-phase).
+Edit `server/.env` in your own editor. After editing it, restart `make dev`, then check the backend with
+`curl -s localhost:8000/health`. It should report `"planner_configured":true,"provider":"groq"`.
 
 ---
 
@@ -345,13 +364,18 @@ The side panel shows the backend `/health` status, a task box, Start/Stop, the c
 - Closing the side panel stops the agent and discards the vault.
 - The extension can only operate on `http://localhost` / `http://127.0.0.1` pages in v0.1.
 
-### What you can run today (without an LLM key)
+### Example tasks (demo site)
 
-With no provider configured, you can:
-- run the full non-LLM path in real Chrome: snapshot → IR → sanitization → placeholders/vault → payload → egress gate
-  → `POST /plan`, where the server logs the sanitized payload and returns 503;
-- see the agent end cleanly with "Planner error", with the vault cleared and nothing typed;
-- watch the corresponding events on the dashboard.
+With a Groq key configured, these tasks have been run end to end (headless) with the real planner:
+- `Fill my alternate email with my email. Do not submit.` The model types the header email's placeholder into
+  "Alternate email", the value is verified, and the task ends with `done`.
+- `Fill my email and address. Do not submit.` The model asks for the address. Your answer is sanitized locally to
+  `[ADDRESS_n]`. The model then fills Email and Address one step at a time, each verified, and ends with `done`.
+- `…and save the changes.` The Save click is proposed, then paused for your confirmation (R1). Denying it prevents
+  the click.
+
+Without a key, the non-LLM path still runs: snapshot → IR → sanitization → placeholders/vault → payload → egress gate
+→ `POST /plan`, which logs the sanitized payload and returns 503. The agent then stops cleanly with "Planner error".
 
 ### Headless E2E driver (dev tool)
 
@@ -379,7 +403,7 @@ make leaks         # canary leak check (the telemetry part needs the server runn
 
 What the suites cover:
 - **vitest (extension):**
-  - normalizer and detectors;
+  - normalizer and detectors (including the extent of cue-less addresses);
   - Luhn/Verhoeff/PAN checksums;
   - placeholder reuse and vault views;
   - every egress gate rule, including the tripwire and mask-once-then-block;
@@ -389,7 +413,9 @@ What the suites cover:
   - payload validation;
   - response validation and repair (with a **test-only** scripted provider);
   - provider errors → 502, no provider → 503;
-  - the telemetry relay and CORS.
+  - the telemetry relay and CORS;
+  - `GroqProvider`: request shape, strict-schema rules and the scroll merge/restore, error mapping, and
+    429/5xx/timeout retries within the budget. These tests use `httpx.MockTransport`: no network, no key.
 - **`scripts/check_leaks.py`:** seeds 9 known sensitive values (the demo-site values and the representative task's
   values). It searches everything the backend logged, plus the relay's current telemetry state with `--telemetry`, for
   exact, lowercase and digits-only matches. It prints only labels and locations, never the values, and exits 1 on any
@@ -400,28 +426,36 @@ Latest results (see `docs/PROGRESS.md`):
 | Check | Result |
 |---|---|
 | `tsc --noEmit` | clean |
-| vitest | 51 / 51 passing |
-| pytest | 21 / 21 passing |
-| `check_leaks.py` | 0 of 9 seeded values found in the logged payloads and tested telemetry |
+| vitest | 53 / 53 passing |
+| pytest | 54 / 54 passing |
+| `check_leaks.py --telemetry` | 0 of 9 seeded values in the payloads and telemetry of the real-Groq runs |
 
-The leak-check result covers only the runs performed so far. None of them reached a live LLM, so every logged payload
-is a step-1 payload. It is evidence for these runs, not a general guarantee.
+The leak-check result covers the specific synthetic values and runs tested so far. It is evidence for those runs, not
+a general guarantee. The first live multi-step run did leak address fragments (see limitations). That led to a fix in
+address detection, and the result above is from after the fix.
 
 ---
 
 ## Current Limitations
 
-- **The live LLM planner has never been executed.** The planner pipeline (prompt, provider protocol, response
-  validation, repair) exists and is tested with a test-only stub. The real provider call is blocked because no API key
-  is configured, so `/plan` returns 503. As a result:
-  - no LLM-chosen action has run;
-  - the full *LLM → action → browser* loop (milestone M7) is not demonstrated;
-  - prompt quality, target selection and `done` behaviour are untested.
-- **Several flows are untested in the live loop:** save confirmation / Deny, Stop and panel-close mid-task, and
-  `ask_user` / hand-off. The policy is unit-tested and the executor is verified directly, but neither has been driven
-  by real planner output. Testing by a person in the real (non-headless) side panel is also outstanding.
+- **Live testing so far is narrow.** It covers headless Chrome, one demo page and a handful of tasks.
+  - The manual, non-headless side-panel flow has not been fully validated.
+  - Stop and panel-close mid-task have not been verified with a live planner.
+  - The T1 credential hand-off has not been validated live, because the demo page has no credential or card field.
+    It is unit-tested.
+  - The representative task with the email and address written into the task text was not run live. The equivalent
+    `ask_user` flow passed.
+- **Planner wording:** `openai/gpt-oss-20b` phrases `ask_user` questions awkwardly ("provide a placeholder for the
+  address"). It still works, because the answer is sanitized locally.
+- **Groq free-tier rate limit (8K tokens/min).** One planner step is about 2.5K tokens, so tasks of 4 or more steps
+  hit HTTP 429.
+  - The provider waits out `retry-after` only within its 25 s budget, which made one step take about 20 s in testing.
+  - If the wait doesn't fit, the task stops with "Planner error: … rate limit reached".
 - **Detection is heuristic; there is no NER.**
-  - Names and addresses are found mainly through contextual cues.
+  - Names are found through contextual cues.
+  - Addresses are found through cues ("my address …"), or through a 6-digit PIN code near address words, grown to
+    the surrounding address tokens. An address with neither a cue nor a PIN is not detected.
+  - This gap was exposed live: see [Privacy incident log](#privacy-incident-log).
   - DOB becomes `[REDACTED_TEXT]` rather than a typed placeholder.
   - Obfuscated emails are not detected.
   - Cue false positives are possible.
@@ -433,11 +467,24 @@ is a step-1 payload. It is evidence for these runs, not a general guarantee.
   - per-origin runtime permissions;
   - `navigate` / `inspect` actions and action batching;
   - Firefox, WebGPU, benchmarks.
-- **Timeout mismatch:** the current Anthropic client (60 s timeout × up to 3 attempts) can exceed the extension's
-  60 s `/plan` abort.
 - **Dashboard:** `ERROR` events appear in the timeline but don't light a stage. Panel-close telemetry is best-effort.
 
-The full list is in `docs/PROGRESS.md` → "Known issues / limitations".
+The full list is in `docs/PROGRESS.md` → "Open items".
+
+## Privacy incident log
+
+**2026-09-25: address fragments sent to the planner (resolved).**
+- **What happened:** in the first live multi-step run, a synthetic address typed as an answer to `ask_user` was
+  masked only at its 6-digit PIN code. The street and locality reached the Groq planner in 3 payloads, and appeared
+  in telemetry and on the dashboard. Only synthetic test data was involved.
+- **Why the gate missed it:** the egress gate's residual scan uses the same detector logic, so it did not catch the
+  leftover text independently.
+- **How it was found:** the canary leak check and the dashboard check both flagged it.
+- **Fix:** in `extension/src/privacy/detectors.ts`, a PIN-code detection now grows to the surrounding address tokens.
+  Regression tests were added.
+- **After the fix:** 0 of 9 known synthetic values in the planner payloads, telemetry, dashboard and server console
+  output.
+- Full write-up: `docs/PROGRESS.md` → "Security incident 2026-09-25 (resolved)".
 
 ---
 
@@ -445,11 +492,13 @@ The full list is in `docs/PROGRESS.md` → "Known issues / limitations".
 
 From `docs/ROADMAP.md` and `docs/PROGRESS.md`:
 
-1. **Phase 1a: planner provider swap.** Replace the Anthropic provider with a free hosted provider (likely Groq),
-   changing only the server provider layer (`providers.py`, `config.py`, `main.py`, `.env.example`, tests). The
-   payload/response schemas, prompt framing, privacy boundary and extension stay unchanged.
-2. **Phase 1b: first live run.** Run the full loop (M7) with a real planner, work through the manual E2E checklist in
-   `docs/PROGRESS.md`, re-run the leak check, then polish the dashboard (M8).
+1. **Finish Phase 1**, in this order (the provider swap to Groq and the live headless runs are done):
+   1. the manual non-headless side-panel checklist in `docs/PROGRESS.md`: the three live tasks, Stop and
+      panel-close mid-task, with the dashboard watched;
+   2. `make leaks`;
+   3. freeze and commit the Phase 1 milestone;
+   4. dashboard polish (M8).
+2. **Then decide the next phase together.** None of the phases below is started automatically.
 3. **Real-website compatibility:** from the demo site to simple external forms, dynamic React sites and more complex
    pages (never live banking or government sites).
 4. **Visual perception ("need-to-see"):** on-device OCR (PP-OCRv5) and face detection (YuNet) with ONNX Runtime Web
