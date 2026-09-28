@@ -2,13 +2,14 @@
 
 SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-weight Browser Agents**.
 
-> **Start here in a new session:** read `docs/PROGRESS.md` → "Next session" first.
-> - **Status:** Phase 1 was verified **headless** on the demo site on 2026-09-25. That is the real DOM loop through a
->   hosted planner (Groq `openai/gpt-oss-20b`, effort `medium`).
-> - **Privacy bug:** one was found and fixed that day (a partially masked address was sent to the planner). See
->   "Security incident 2026-09-25 (resolved)" in PROGRESS.
-> - **Next:** the manual non-headless side-panel checklist (Stop, panel close, dashboard), then `make leaks`, then the
->   user freezes and commits Phase 1, then the next phase is discussed.
+> **Start here in a new session:** read `docs/PROJECT_CONTEXT.md` (current state), then `docs/PROGRESS.md` →
+> "Next session", then `git status`.
+> - **Status:** Phase 1 is **frozen** (2026-09-28, with documented manual limitations).
+>   - The real DOM loop through a hosted planner (Groq `openai/gpt-oss-20b`, effort `medium`) was verified headless
+>     (09-25), then in a visible Chrome with the real side panel (09-28, tests A–G, `make leaks` 0/9).
+>   - A privacy bug found on 09-25 (a partially masked address was sent to the planner) is fixed. See "Security
+>     incident 2026-09-25 (resolved)" in PROGRESS.
+> - **Next:** M8 polish, then the next phase is discussed with the user.
 > - **Do not start OCR/vision or other new features on your own.**
 
 VEIL is a Chrome MV3 extension that performs web tasks for a user ("fill my email and address, don't submit")
@@ -55,7 +56,7 @@ side panel (orchestrator, owns vault)            content script (top frame, loca
 | `dashboard/` | C. Read-only observability app (:8090) | GET `/telemetry/state` + SSE `/telemetry/stream` only. Never controls the agent. |
 | `server/` | D. FastAPI backend (:8000) | `/health`, `/plan` (planner), `/telemetry/*` relay (separate router, in-memory). |
 | `scripts/` | Tooling | `check_leaks.py` (canary leak check), `e2e_cdp.mjs` (headless Chrome E2E driver). |
-| `docs/` | `PROGRESS.md`, `ROADMAP.md` | Keep current at every milestone. |
+| `docs/` | `PROJECT_CONTEXT.md`, `PROGRESS.md`, `ROADMAP.md`, `CHANGELOG.md` | See "Documentation roles and governance". |
 
 **Extension (`extension/src/`):**
 - `platform/chrome.ts`: the only module that touches `chrome.*`; `ensureContentScript()` is the single injection seam.
@@ -108,6 +109,34 @@ DOM-only private agent loop, end to end, for real. Actions: `click`, `type`, `se
 - Don't change the architecture casually; stop and ask on a genuine incompatibility.
 - Git: repo `origin` = github.com/MehulSharmaCode/Veil. **The user commits and pushes.** Don't commit unless asked.
 - Never write API keys into files other than the user's own `server/.env` (gitignored). Don't add keys yourself.
+
+## Documentation roles and governance (mandatory)
+
+| File | Responsible for |
+|---|---|
+| `README.md` | Human-facing: what Veil is, setup, usage, testing, high-level limitations. |
+| `CLAUDE.md` | Claude Code instructions: constraints, workflow, concise orientation. |
+| `docs/PROJECT_CONTEXT.md` | Canonical **current-state** snapshot: what exists now, never plans. |
+| `docs/PROGRESS.md` | Milestones, verified results, the current checklist, dated progress, decisions, open items. |
+| `docs/ROADMAP.md` | Planned future phases and deferred scope. |
+| `docs/CHANGELOG.md` | Chronological implementation history (append-only, oldest first). |
+
+Link to other files rather than copying content between them.
+
+**Every meaningful project change must update the documentation in the same task.**
+1. Any change to code, configuration, dependencies, architecture, tests, security/privacy, project status or setup,
+   however small, **must**:
+   - append an entry to `docs/CHANGELOG.md`;
+   - update `docs/PROJECT_CONTEXT.md`;
+   - update the directly affected sections of README, PROGRESS or ROADMAP. Update only the files that are affected.
+2. Fix known documentation inconsistencies now; never leave them for a later milestone.
+3. Every implementation task ends with: implementation → tests → documentation synchronization → final status
+   report. Before declaring a task complete:
+   - inspect `git diff`;
+   - confirm the docs match the implementation;
+   - run the relevant tests or typechecks;
+   - report the changed files.
+4. Never write API keys or raw sensitive values into docs or logs.
 
 ## Running on macOS
 

@@ -1,34 +1,38 @@
 # VEIL Progress Log
 
+> **Role of this file:** milestones, verified results, the current checklist, decisions and open items.
+> - The current-state snapshot is in `PROJECT_CONTEXT.md`.
+> - The chronological history is in `CHANGELOG.md`.
+> - Future phases are in `ROADMAP.md`.
+
 ## Next session: start here
 
-**Current state (end of 2026-09-25):**
-- VEIL v0.1 (DOM-only) is implemented.
-- **Phase 1**, the real planner loop, has been **verified in headless Chrome** on the controlled demo site. The chain
-  is: task → DOM snapshot → IR → sanitization → local vault → egress gate → real Groq planner → structured action →
+**Current state (2026-09-28): Phase 1 FROZEN WITH DOCUMENTED MANUAL LIMITATIONS.**
+- VEIL v0.1 (DOM-only) is implemented. The Phase 1 chain has now been validated live in a **visible (headed)
+  Chrome 154 with the real Chrome side panel** on the controlled demo site:
+  task → DOM snapshot → IR → sanitization → local vault → egress gate → real Groq planner → structured action →
   local validation → local placeholder resolution → Chrome execution → verification → next step.
+- The 2026-09-28 runs covered all seven checklist items A–G. See "Live validation 2026-09-28" below.
+- `make leaks` found 0/9 over 24 planner payloads and 36 telemetry events. No local-code defect was found, and no
+  code was changed.
 - Current provider: **Groq**, model `openai/gpt-oss-20b`, reasoning effort `medium`.
-- Live single-step and multi-step planner-driven runs succeeded **after** the address-detection fix. The final leak
-  check passed: 0/9 known synthetic values.
-- A privacy bug was found and fixed during the live runs: see "Security incident 2026-09-25 (resolved)" below.
-- **Not yet done:** the short **manual, non-headless** side-panel checklist (bottom of this file).
+- A privacy bug was found and fixed on 2026-09-25: see "Security incident 2026-09-25 (resolved)" below.
+- **Manual limitations:**
+  - The runs were driven through CDP by Claude Code, not by a human hand.
+  - The side panel was opened with `chrome.sidePanel.open()` (CDP user-gesture evaluate), not the toolbar icon.
+  - It was closed with `chrome.sidePanel.close()`, not the panel's close button.
+  - T1 (credential hand-off) still cannot be exercised on the demo page.
 
-**Uncommitted work (the user reviews and commits manually):**
-- Code: `extension/src/privacy/detectors.ts`, `extension/test/privacy.test.ts`, `server/app/providers.py`,
-  `server/tests/test_groq_provider.py`.
-- Docs: `CLAUDE.md`, `README.md`, `docs/PROGRESS.md`, `docs/ROADMAP.md`.
-- The last commit is `f4a1545 Add Groq planner provider`, which contains the first Groq provider without the
-  schema adaptation. Run `git status` first.
+**Git state:** Phase 1 is frozen in the commit "Freeze Veil Phase 1", which follows
+`ba45fe5 Complete Veil Phase 1 and update handoff`. Run `git status` / `git log` first.
 
 **Plan for the next session, in order:**
-1. Review these docs (`CLAUDE.md`, `README.md`, this file, `docs/ROADMAP.md`) and `git status`.
-2. Do the remaining **manual non-headless Chrome validation** ("Manual E2E checklist" below). The user runs the
-   real side panel; `make dev` must be running and `server/.env` must hold the key.
-3. Confirm the side-panel lifecycle: Stop mid-task, and closing the panel mid-task (kill switch, vault cleared).
-4. Confirm the dashboard during those manual runs: live stages, and no raw values. Run `make leaks` afterwards.
-5. If those checks pass, **freeze the Phase 1 milestone**. The user commits.
-6. Only after that, discuss the next phase with the user (ROADMAP §2 real-website compatibility or later sections).
-7. **Do not** start OCR/vision (ROADMAP §3) or any other new feature on your own.
+1. Review `docs/PROJECT_CONTEXT.md`, this file and `git status`.
+2. Optional: a human repeats one task by hand, using the toolbar icon and the panel's own close button. These two UI
+   entry points were not exercised by the automated runs.
+3. M8 dashboard polish (ROADMAP §1, step 4).
+4. Then discuss the next phase with the user (ROADMAP §2 real-website compatibility or later sections).
+5. **Do not** start OCR/vision (ROADMAP §3) or any other new feature on your own.
 
 **Dev notes for the next session:**
 - **Values in harness output:** `node scripts/e2e_cdp.mjs` prints a `[demo page state]` line with the demo form's
@@ -36,8 +40,11 @@
   into reports; summarize it as filled/empty instead.
 - **Use the seeded values:** manual and harness tests must use the synthetic values seeded in
   `scripts/check_leaks.py` (`SEEDS`). Otherwise `make leaks` cannot detect them.
-- **Evidence file:** `server/logs/received_payloads.pre-address-fix.jsonl` is incident evidence. Keep it local and
-  gitignored. `make leaks` scans only `server/logs/received_payloads.jsonl`, so don't merge the two.
+- **Evidence file:** `server/logs/received_payloads.pre-address-fix.jsonl` was the local incident evidence.
+  - It was **no longer present on 2026-09-28**. `server/logs/` had been recreated that day, before the validation
+    runs, and why is unknown.
+  - The incident write-up below is unaffected.
+  - `make leaks` scans only `server/logs/received_payloads.jsonl`.
 - **Free tier:** each planner step costs about 2.5K of the 8K tokens/min allowed, so avoid unnecessary live runs.
 
 **Planner configuration (live-verified 2026-09-25):**
@@ -81,7 +88,7 @@ the dashboard contract.
 | M4 Payload + egress gate | ✅ done | Unit-tested incl. tripwire and retry-then-block; `/plan` receives and logs real sanitized payloads. |
 | M5 LLM planner | ✅ done (live) | Groq `openai/gpt-oss-20b`, strict JSON Schema; real responses validated by pydantic + zod. |
 | M6 Validation/taint/confirm/execute/verify | ✅ done (live) | Driven by real LLM output: type → V2/V3/T2/T3 → local resolve → execute → `value_matches` verify; R1 confirm + Deny. |
-| M7 Full loop | ✅ demonstrated (headless) | Single-action, multi-step with `ask_user`, and Save/Deny, on the demo site. Manual side-panel checks still open (see checklist). |
+| M7 Full loop | ✅ done (live, real side panel) | Headless 09-25. Visible Chrome with the real side panel on 09-28: single, multi-step, Save/Deny, Stop, panel close, task values, dashboard; leak check 0/9. |
 | M8 Dashboard polish | 🟡 mostly done | All views, registry-driven stages, generic rendering of unknown events. Polish after M7. |
 
 ## Security incident 2026-09-25 (resolved): address fragments sent to the planner
@@ -127,7 +134,8 @@ the dashboard contract.
 - The API key never appeared in any output.
 
 **Evidence:**
-- The pre-fix payload log is kept locally as `server/logs/received_payloads.pre-address-fix.jsonl`.
+- The pre-fix payload log was kept locally as `server/logs/received_payloads.pre-address-fix.jsonl`.
+- *2026-09-28:* that file is no longer on disk; why is unknown. It was never committed.
 - It is gitignored. **Do not delete it, and do not commit it.**
 
 **Residual risk:**
@@ -199,7 +207,8 @@ the dashboard contract.
 
 **Tooling:** `Makefile`, `scripts/check_leaks.py`, `scripts/e2e_cdp.mjs`.
 
-**Repo:** `origin` = github.com/MehulSharmaCode/Veil. The user commits and pushes; the 2026-09-25 changes are uncommitted.
+**Repo:** `origin` = github.com/MehulSharmaCode/Veil. The user commits and pushes. The 2026-09-25 changes are
+committed in `ba45fe5`.
 
 ## Verified in real Chrome (headless Chrome 153 via `scripts/e2e_cdp.mjs`)
 
@@ -245,7 +254,53 @@ the dashboard contract.
 
 **Not yet verified:** see "Open items" below.
 
-## Test results (latest: 2026-09-25)
+## Live validation 2026-09-28 (visible Chrome, real side panel)
+
+**Method:**
+- Services came from `make dev`. `/health` reported `provider: groq`, `model: openai/gpt-oss-20b`,
+  `planner_configured: true`, and `VEIL_EFFORT=medium`.
+- A session-local driver (not committed; derived from `scripts/e2e_cdp.mjs`) launched a **visible, headed** Google
+  Chrome 154 with a throwaway profile and loaded `extension/dist` via CDP `Extensions.loadUnpacked`.
+- It opened the demo site, with the dashboard in a second window.
+- It opened the **real Chrome side panel** by calling `chrome.sidePanel.open()` from an extension page with a CDP
+  user gesture. The service worker's gesture-less call was refused ("may only be called in response to a user
+  gesture").
+- It drove the panel's own DOM controls: task box, Start, Stop and the prompt buttons.
+- Task and answer text came from the `SEEDS` in `scripts/check_leaks.py`, and the driver printed only booleans.
+- A page-side listener timestamped `input`/`click` events.
+- Screenshots of the panel, page and dashboard were checked, and kept locally only.
+
+**Results:**
+
+| Test | Result | Observed |
+|---|---|---|
+| A single step: "Fill my alternate email with my email. Do not submit." | PASS | `type e12 [EMAIL_1]` → ✓ verified (`value_matches_after_settle`) → `done`. Alternate email equals the page's header email, Save not clicked, other fields unchanged, vault 2 → 0. |
+| B multi-step: "Fill my email and address. Do not submit." with `ask_user` answered by the `task:address` seed | PASS | 4 planner calls: `ask_user` → answer sanitized to `[ADDRESS_1]` → `type e10 [EMAIL_1]` ✓ → `type e13 [ADDRESS_1]` ✓ → `done`. The full seeded address was typed. The last step took 19 s: a 429 `retry-after` waited out within the budget. Vault → 0. |
+| C Save protection: "…with my email and save the changes." with Deny | PASS | `click e14` "Save changes" was proposed **4 times**. Each time R1_SUBMIT_LIKE raised a confirmation and each was denied, so **Save never executed** (`saved: false`). The model then asked "Do you want to save the changes now?", Stop task was chosen, and the vault → 0. See the note below. |
+| D Stop: task with values in the text; Stop pressed after the first verified type | PASS | Stop was pressed while step 2 was planning. Panel: `stopped`, vault count 0. Relay: `VAULT_UPDATED cleared`, `TASK_COMPLETED stopped`. The page was unchanged for 20 s after the stop, and Address stayed empty. |
+| E panel close: same task, `chrome.sidePanel.close()` after the first verified type | PASS | Re-run with page timestamps: the only page input was Email, 376 ms **before** the close. The panel target was gone and nothing changed for 20 s. The relay received `VAULT_UPDATED cleared` and `TASK_COMPLETED panel_closed` (best-effort, but delivered). See the first-attempt note below. |
+| F values in the task text (`task:email` and `task:address` seeds) | PASS | The panel showed "sent as: Fill my email [EMAIL_1] and my address [ADDRESS_1]. Do not submit." Both fields got exactly the seeded values, each ✓ verified, then `done`. Vault 4 → 0. The server only ever received the placeholder form of the task. |
+| G dashboard (every run) | PASS | Live over SSE. All stages lit, including Confirmation in C, and the timelines matched the panel logs. The payload view shows the sanitized payload. **0/9** seeded values in the dashboard text and HTML on every run. The dashboard only issues GETs. |
+
+**Privacy:**
+- `make leaks` found **0/9** over 24 planner payloads and 36 telemetry events.
+- The server console output and the raw telemetry JSON also had 0 hits, and there were no key-like strings.
+- This is evidence for these runs and seeds, not a proof of zero leakage.
+
+**Notes:**
+- **Denied Save re-proposed:**
+  - Denials reach the planner as `user_denied` history, and the prompt tells it to choose differently.
+  - `gpt-oss-20b` still re-proposed Save 3 more times. It also filled the primary Email field unprompted ("filling it
+    will allow form submission").
+  - Local policy held every time. This is planner behaviour, not a local defect, and is recorded as a limitation.
+- **Panel close with an action in flight:**
+  - In the first E attempt, which had no timestamps, the step-2 `type [ADDRESS_1]` also landed. The relay shows
+    `ACTION_VALIDATED` before `TASK_COMPLETED panel_closed`.
+  - `content()` checks the stop flag synchronously right before `chrome.tabs.sendMessage`. So an action already
+    dispatched to the page can complete, but no new one is dispatched after close or Stop.
+  - This is by design ("executes are never re-sent" and cannot be recalled) and is recorded as a limitation.
+
+## Test results (latest: 2026-09-28)
 
 | Suite | Result |
 |---|---|
@@ -254,11 +309,18 @@ the dashboard contract.
 | pytest: payload validation, response validation + repair (test-only stub), provider errors → 502, no provider → 503, telemetry relay, CORS; GroqProvider request shape, strict-schema rules + scroll merge/restore, error mapping, 429/5xx/timeout retries within budget (MockTransport, no network) | ✅ 54/54 |
 | `scripts/check_leaks.py --telemetry` (real Groq runs, post-fix) | ✅ 0/9 |
 
+**Re-run 2026-09-28**, before and after the live validation (`make test`; no application code changed):
+- `tsc` clean, vitest 53/53, pytest 54/54.
+- One harmless Starlette deprecation warning (`httpx` with `TestClient`).
+- `make leaks` after the live runs: 0/9, over 24 payloads and 36 telemetry events.
+
 ## Decisions
 
 | Date | Decision | Why |
 |---|---|---|
 | 09-23 | Anthropic, `claude-sonnet-5`, effort `medium` | Initial user choice; replaced 09-25 (never run live). |
+| 09-28 | Phase 1 frozen with documented manual limitations | Tests A–G passed live in a visible Chrome with the real side panel; `make leaks` 0/9; no local defect found. The runs were CDP-driven, and T1 was not exercisable. |
+| 09-28 | Planner re-proposing a denied Save is recorded as a limitation, not fixed | Local R1 held every time; changing the prompt or policy would be a new behaviour, not a defect fix. |
 | 09-25 | Groq `openai/gpt-oss-20b`, effort `medium`, strict JSON Schema, REST via `httpx` | Free tier; strict mode supported for this model (Groq docs); no new dependency. |
 | 09-25 | Provider-local schema adaptation (merge same-`type` `anyOf` variants, nullable fields; strip nulls on output) | Groq 400 `discriminator_value_overlap`; keeps the canonical schema/validators unchanged. |
 | 09-25 | Provider budget 20 s/attempt, 25 s/call, ≤3 attempts | Two calls (repair) must finish inside the extension's 60 s `/plan` abort. |
@@ -278,24 +340,29 @@ the dashboard contract.
 | 09-23 | Executes are never re-sent; a click that kills the message channel (navigation) counts as "changed" | Avoid double-submits. |
 | 09-23 | E2E driver uses CDP over `--remote-debugging-pipe`, no npm deps | Chrome ≥137 ignores `--load-extension`. |
 
-## Open items (as of 2026-09-25)
+## Open items (as of 2026-09-28)
 
-1. **The manual non-headless side-panel flow has not been fully validated.** All live runs so far were headless
-   (`scripts/e2e_cdp.mjs`).
-2. **Stop and closing the side panel mid-task** have not been verified with a live planner.
-3. **The credential hand-off (T1)** has not been validated with a live planner. The current demo page has no
+1. **Human-hand UI entry points were not exercised.** The 2026-09-28 runs used a visible Chrome and the real side
+   panel, but CDP drove them. The panel was opened with `chrome.sidePanel.open()` rather than the toolbar icon
+   (`configureSidePanelOnActionClick`), and closed with `chrome.sidePanel.close()` rather than the panel's close
+   button. Both are thin Chrome UI paths into the same code.
+2. **The credential hand-off (T1)** has not been validated with a live planner. The current demo page has no
    password, OTP or card field, so it cannot be exercised there without a fixture change. It is unit-tested.
-4. **Groq free tier: 8K tokens/min.** A step is about 2.5K tokens, so longer tasks hit 429.
-   - The provider waits out `retry-after` only within its 25 s budget. In the multi-step run the final step waited
-     about 19–21 s and succeeded.
+3. **Groq free tier: 8K tokens/min.** A step is about 2.5K tokens, so longer tasks hit 429.
+   - The provider waits out `retry-after` only within its 25 s budget. Steps that waited 19–23 s succeeded on 09-25
+     and 09-28.
    - Otherwise the task stops with "Planner error: … rate limit reached".
-5. **Awkward `ask_user` wording:** gpt-oss-20b asks the user to "provide a placeholder for the address". It works,
-   because the answer is sanitized locally.
-6. **Address detection is heuristic.** Addresses are found via a cue, or via a PIN near address words (grown to the
+4. **Planner quality (gpt-oss-20b):**
+   - It words `ask_user` awkwardly ("provide a placeholder ID for your address field"); this works, because answers
+     are sanitized locally.
+   - It re-proposes a denied Save several times and may take unrequested but allowed actions, such as filling the
+     primary Email in test C.
+   - Local validation and R1 held in every case.
+5. **Address detection is heuristic.** Addresses are found via a cue, or via a PIN near address words (grown to the
    surrounding tokens). An address with **neither a cue nor a PIN is not detected**.
-7. **The exact representative task** (email and address written into the task text) was not the task used in the
-   final live validation. The equivalent `ask_user` flow passed.
-8. **Vision/OCR/need-to-see** remains intentionally deferred (ROADMAP §3).
+6. **Stop and panel close don't recall an action that is already dispatched.** The loop checks the stop flag before
+   every content-script message. An `execute` already sent to the page completes; nothing new is sent after it.
+7. **Vision/OCR/need-to-see** remains intentionally deferred (ROADMAP §3).
 
 **Other known limitations, carried over from the v0.1 build and unchanged:**
 - **Detection (no NER):**
@@ -313,7 +380,7 @@ the dashboard contract.
 
 Everything in ROADMAP §6. No extra deferrals.
 
-## Manual E2E checklist (next session: non-headless)
+## Manual E2E checklist
 
 **Setup:**
 1. Start the servers with `make dev`. `server/.env` must contain `GROQ_API_KEY`; check with
@@ -332,18 +399,16 @@ Everything in ROADMAP §6. No extra deferrals.
   seed. *(Headless, 09-25, after the address fix.)*
 - [x] A Save attempt ("…and save the changes.") triggers the local confirmation; Deny prevents the click.
   *(Headless, 09-25.)*
-- [ ] **Manual:** repeat the three tasks above in the real (non-headless) side panel.
-  - Check that the panel shows the sanitized task and vault metadata (placeholders only).
-  - Check that the confirmation and `ask_user` prompts work by hand.
-- [ ] **Manual:** Stop mid-task halts the loop and clears the vault (count → 0).
-  - The dashboard should show `TASK_COMPLETED stopped`.
-- [ ] **Manual:** closing the side panel mid-task stops the agent.
-  - The dashboard should show `panel_closed`; this is best-effort.
-- [ ] Representative task with the values written into the task:
-  `Fill my email <task:email seed> and my address <task:address seed>. Do not submit.`
-  - The task should show `[EMAIL_1]` / `[ADDRESS_1]`.
-  - Both fields should be filled and verified, ending with `done`.
-  - *Not yet run live.*
+- [x] Repeat the three tasks above in the real (non-headless) side panel. *(09-28, visible Chrome 154, real side
+  panel, CDP-driven. See "Live validation 2026-09-28", tests A–C. The panel showed the sanitized task and vault
+  metadata only. The confirmation and `ask_user` prompts worked.)*
+- [x] Stop mid-task halts the loop and clears the vault (count → 0). The dashboard shows `TASK_COMPLETED stopped`.
+  *(09-28, test D.)*
+- [x] Closing the side panel mid-task stops the agent. The dashboard shows `panel_closed` (best-effort, and it was
+  delivered). *(09-28, test E, via `chrome.sidePanel.close()`.)*
+- [x] Representative task with the values written into the task: it shows `[EMAIL_1]` / `[ADDRESS_1]`, both fields
+  are filled and verified, and it ends with `done`. *(09-28, test F.)*
 - [ ] T1 hand-off with a live planner. *Not possible on the current demo page (no credential/card field); unit-tested only.*
-- [ ] **After the manual runs:** `make leaks` → 0/9, and the dashboard shows no raw value.
-  - Earlier results: 0/9 on the post-fix headless runs (09-25); the pre-fix run showed 2/9.
+- [x] After the runs, `make leaks` → 0/9, and the dashboard shows no raw value. *(09-28: 24 payloads, 36 telemetry
+  events; dashboard 0/9 on every run.)*
+- [ ] Optional: a human repeats one task with the toolbar icon and the panel's own close button.

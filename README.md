@@ -9,20 +9,23 @@ and verifies the result.
 
 Built for SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-weight Browser Agents**.
 
-> **Status: v0.1 (DOM-only), Phase 1 demonstrated.** On the controlled demo site, in headless Chrome, a real hosted
-> planner (Groq, `openai/gpt-oss-20b`) has driven:
+> **Status: v0.1 (DOM-only), Phase 1 frozen (2026-09-28) with documented manual limitations.** On the controlled
+> demo site, a real hosted planner (Groq, `openai/gpt-oss-20b`) drove the loop in a visible Chrome with the real side
+> panel:
 > - a single-action task;
 > - a multi-step task, including `ask_user`;
-> - a Save attempt that local confirmation blocked.
+> - a task with the values written into the task text;
+> - Save attempts that local confirmation blocked;
+> - Stop mid-task and closing the panel mid-task.
 >
-> Each action was validated locally, executed in the page and verified.
+> Each action was validated locally, executed in the page and verified. The leak check found 0 of 9 known synthetic
+> values in the planner payloads and telemetry.
 >
-> One privacy bug was found and fixed during those runs: a partially masked address was sent to the planner (see
-> [Privacy incident log](#privacy-incident-log)). After the fix, the real-provider leak check found 0 of 9 known
-> synthetic values.
+> One privacy bug was found and fixed on 2026-09-25: a partially masked address was sent to the planner (see
+> [Privacy incident log](#privacy-incident-log)).
 >
-> Still outstanding: a short manual (non-headless) side-panel checklist. No external websites are supported. See
-> [Current limitations](#current-limitations).
+> The runs were driven through CDP rather than by hand; see [Current limitations](#current-limitations). No external
+> websites are supported.
 
 ---
 
@@ -258,8 +261,10 @@ Veil/
 │   ├── check_leaks.py         # canary leak check over logged payloads (+ live telemetry)
 │   └── e2e_cdp.mjs            # headless Chrome E2E driver (dev tool, no npm deps)
 ├── docs/
-│   ├── PROGRESS.md            # detailed status, verification log, decisions, known issues
-│   └── ROADMAP.md             # phases after v0.1
+│   ├── PROJECT_CONTEXT.md     # canonical current-state snapshot
+│   ├── PROGRESS.md            # milestones, verification log, checklist, decisions, open items
+│   ├── ROADMAP.md             # phases after v0.1, deferred scope
+│   └── CHANGELOG.md           # chronological implementation history
 ├── CLAUDE.md                  # AI-assistant/project context (not a setup guide)
 ├── Makefile                   # setup, build, run, test, leak-check targets
 └── README.md
@@ -303,7 +308,7 @@ make setup
 This runs:
 1. `npm install` in `extension/` (esbuild, TypeScript, vitest, `@types/chrome`, zod).
 2. `python3 -m venv server/.venv` and `pip install -r server/requirements.txt` (FastAPI, uvicorn, pydantic,
-   python-dotenv, anthropic, httpx, pytest).
+   python-dotenv, httpx, pytest).
 3. Copies `server/.env.example` to `server/.env` **only if `server/.env` does not already exist**.
 
 ### Configure the backend (`server/.env`)
@@ -366,7 +371,8 @@ The side panel shows the backend `/health` status, a task box, Start/Stop, the c
 
 ### Example tasks (demo site)
 
-With a Groq key configured, these tasks have been run end to end (headless) with the real planner:
+With a Groq key configured, these tasks have been run end to end with the real planner, headless and in a visible
+Chrome with the real side panel:
 - `Fill my alternate email with my email. Do not submit.` The model types the header email's placeholder into
   "Alternate email", the value is verified, and the task ends with `done`.
 - `Fill my email and address. Do not submit.` The model asks for the address. Your answer is sanitized locally to
@@ -428,25 +434,28 @@ Latest results (see `docs/PROGRESS.md`):
 | `tsc --noEmit` | clean |
 | vitest | 53 / 53 passing |
 | pytest | 54 / 54 passing |
-| `check_leaks.py --telemetry` | 0 of 9 seeded values in the payloads and telemetry of the real-Groq runs |
+| `check_leaks.py --telemetry` | 0 of 9 seeded values in the payloads and telemetry of the real-Groq runs (2026-09-28: 24 payloads, 36 events) |
 
 The leak-check result covers the specific synthetic values and runs tested so far. It is evidence for those runs, not
-a general guarantee. The first live multi-step run did leak address fragments (see limitations). That led to a fix in
+a general guarantee. The first live multi-step run on 2026-09-25 did leak address fragments (see the incident log). That led to a fix in
 address detection, and the result above is from after the fix.
 
 ---
 
 ## Current Limitations
 
-- **Live testing so far is narrow.** It covers headless Chrome, one demo page and a handful of tasks.
-  - The manual, non-headless side-panel flow has not been fully validated.
-  - Stop and panel-close mid-task have not been verified with a live planner.
+- **Live testing so far is narrow.** It covers one demo page and a handful of tasks, in headless Chrome (2026-09-25)
+  and in a visible Chrome with the real side panel (2026-09-28).
+  - The 2026-09-28 runs were driven through CDP, not by hand. The panel was opened and closed with
+    `chrome.sidePanel.open()`/`close()`, so the toolbar icon and the panel's close button were not exercised.
   - The T1 credential hand-off has not been validated live, because the demo page has no credential or card field.
     It is unit-tested.
-  - The representative task with the email and address written into the task text was not run live. The equivalent
-    `ask_user` flow passed.
-- **Planner wording:** `openai/gpt-oss-20b` phrases `ask_user` questions awkwardly ("provide a placeholder for the
-  address"). It still works, because the answer is sanitized locally.
+  - Stop and panel close halt the loop before the next dispatch. An action already sent to the page still completes.
+- **Planner quality (`openai/gpt-oss-20b`):**
+  - It phrases `ask_user` questions awkwardly ("provide a placeholder for the address"). This still works, because the
+    answer is sanitized locally.
+  - After a denied Save it re-proposed Save several times, and it once filled an extra field it wasn't asked to.
+  - Local validation and confirmation held every time.
 - **Groq free-tier rate limit (8K tokens/min).** One planner step is about 2.5K tokens, so tasks of 4 or more steps
   hit HTTP 429.
   - The provider waits out `retry-after` only within its 25 s budget, which made one step take about 20 s in testing.
@@ -483,7 +492,7 @@ The full list is in `docs/PROGRESS.md` → "Open items".
 - **Fix:** in `extension/src/privacy/detectors.ts`, a PIN-code detection now grows to the surrounding address tokens.
   Regression tests were added.
 - **After the fix:** 0 of 9 known synthetic values in the planner payloads, telemetry, dashboard and server console
-  output.
+  output. This was confirmed again in the 2026-09-28 live validation.
 - Full write-up: `docs/PROGRESS.md` → "Security incident 2026-09-25 (resolved)".
 
 ---
@@ -492,12 +501,7 @@ The full list is in `docs/PROGRESS.md` → "Open items".
 
 From `docs/ROADMAP.md` and `docs/PROGRESS.md`:
 
-1. **Finish Phase 1**, in this order (the provider swap to Groq and the live headless runs are done):
-   1. the manual non-headless side-panel checklist in `docs/PROGRESS.md`: the three live tasks, Stop and
-      panel-close mid-task, with the dashboard watched;
-   2. `make leaks`;
-   3. freeze and commit the Phase 1 milestone;
-   4. dashboard polish (M8).
+1. **Phase 1 is frozen** (2026-09-28). The remaining Phase 1 item is dashboard polish (M8).
 2. **Then decide the next phase together.** None of the phases below is started automatically.
 3. **Real-website compatibility:** from the demo site to simple external forms, dynamic React sites and more complex
    pages (never live banking or government sites).
@@ -520,4 +524,6 @@ From `docs/ROADMAP.md` and `docs/PROGRESS.md`:
   the egress gate and client.
 - Keep `extension/` generic. Never reference demo-site ids, names, selectors or values.
 - No fakes at runtime. Test stubs belong only in tests.
-- Keep `docs/PROGRESS.md` and `docs/ROADMAP.md` current at each milestone.
+- Update the documentation in the same change as the code. Every meaningful change adds a `docs/CHANGELOG.md`
+  entry, updates `docs/PROJECT_CONTEXT.md`, and updates whichever README/PROGRESS/ROADMAP sections it affects.
+  `CLAUDE.md` → "Documentation roles and governance" defines each file's role.
