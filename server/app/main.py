@@ -10,19 +10,31 @@ from typing import Any
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 
-from .config import Settings, load_settings
+from .config import PROVIDERS, Settings, load_settings
 from .planner import PlanningFailed, plan
-from .providers import GroqProvider, PlannerProvider
+from .providers import GeminiProvider, GroqProvider, PlannerProvider
 from .schemas import PlannerPayload, PlanResponse
 from .telemetry import Relay, make_router
 
 log = logging.getLogger("veil")
 
 
+def build_provider(settings: Settings) -> PlannerProvider | None:
+    """The configured provider (VEIL_PROVIDER), or None when its key is not set. An unknown provider name
+    is a configuration error: the server refuses to start rather than guess."""
+    if settings.provider not in PROVIDERS:
+        raise ValueError(f"VEIL_PROVIDER must be one of {', '.join(PROVIDERS)}")
+    if not settings.planner_configured:
+        return None
+    if settings.provider == "gemini":
+        return GeminiProvider(settings.gemini_api_key, settings.model, settings.effort)
+    return GroqProvider(settings.groq_api_key, settings.model, settings.effort)
+
+
 def create_app(settings: Settings | None = None, provider: PlannerProvider | None = None) -> FastAPI:
     settings = settings or load_settings()
-    if provider is None and settings.planner_configured:
-        provider = GroqProvider(settings.groq_api_key, settings.model, settings.effort)
+    if provider is None:
+        provider = build_provider(settings)
 
     app = FastAPI(title="VEIL backend", version="0.1.0")
     # Extension pages reach us via host_permissions; CORS is for the dashboard (read-only GETs).
@@ -53,7 +65,7 @@ def create_app(settings: Settings | None = None, provider: PlannerProvider | Non
             with settings.payload_log_path.open("a", encoding="utf-8") as f:
                 f.write(json.dumps({"received_at": time.time(), "payload": payload.model_dump(exclude_none=True)}, ensure_ascii=False) + "\n")
         if provider is None:
-            raise HTTPException(status_code=503, detail="No LLM provider configured: set GROQ_API_KEY in server/.env")
+            raise HTTPException(status_code=503, detail=f"No LLM provider configured: set {settings.key_var} in server/.env")
         t0 = time.perf_counter()
         try:
             result = plan(payload, provider)

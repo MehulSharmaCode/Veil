@@ -507,3 +507,46 @@ Entry template:
 - **Security/privacy implications:** none; no code change.
 - **Git commit:** "Finalize Veil Phase 1 hardening and dashboard" (the M8, hardening and redesign work plus this
   validation record).
+
+## 2026-09-29: Task 2, Gemini planner provider (live validation blocked)
+- **Phase / milestone:** Task 2, a controlled planner-provider migration after the v0.1 release-candidate commit. No
+  architecture, privacy-pipeline, schema, extension or dashboard change.
+- **Objective:** add Gemini behind the existing `PlannerProvider` seam with a configuration toggle and Groq as the
+  rollback; prove parity with unit, contract and leak tests and live runs; make Gemini the default only after live
+  parity.
+- **Research:** official Gemini docs and the SDK source (2026-09-29): `google-genai` 2.25.0 (not the legacy
+  `google-generativeai`); `gemini-3.8-flash` is a stable model id; structured output via a JSON Schema subset;
+  `thinking_level` low/medium/high; the Interactions API stores requests by default, so the stateless
+  `generateContent` API is used; the SDK retries only when configured and its error text embeds the response body.
+- **Files changed:**
+  - server: `app/providers.py` (`GeminiProvider` and Gemini error helpers; `GroqProvider` untouched), `app/config.py`
+    (`VEIL_PROVIDER`, `GEMINI_API_KEY`, per-provider default model, `api_key`/`key_var`), `app/main.py`
+    (`build_provider`, unknown provider refuses to start, provider-aware 503), `requirements.txt`
+    (`google-genai>=2.25,<3`), `.env.example`;
+  - tests: `tests/test_gemini_provider.py` (new, 49), `tests/test_provider_parity.py` (new, 27);
+  - docs: `README.md`, `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/PROGRESS.md`, this file.
+- **Implementation:** see `PROGRESS.md` → "Task 2: Gemini provider". The canonical `RESPONSE_SCHEMA` is sent to Gemini
+  unchanged (accepted live, so no adaptation layer); SDK retries and automatic function calling are off; the same
+  20 s / 25 s / 3-attempt budget; Gemini-specific error mapping; only non-thought text parts are returned.
+- **Validation/tests:** `make test`: `tsc` clean, vitest 116/116, pytest **133/133** (57 before), dashboard 14/14. A
+  mutation check confirmed the leak test fails if a provider error echoes its body. `make leaks` 0/19 over 140
+  payloads, including those sent to Gemini.
+- **Problems discovered (live):**
+  1. `gemini-3.8-flash` answered 503 "high demand" and 504 most of the session; successful calls took ~16 s.
+     (provider capacity)
+  2. After two slow 503s the third attempt carried the leftover budget as its deadline, and Gemini rejected it with
+     HTTP 400 "Minimum allowed deadline is 10s", which hid the real error. (code issue)
+  3. The free tier allows 20 requests/day/model; once exhausted, the 429 carries a misleading 57 s `retryDelay`.
+     (provider quota)
+- **Fixes applied:** (2) no Gemini attempt, or wait before one, with under 10 s of budget left; (3) a per-day
+  QuotaFailure fails at once with "daily request quota exhausted". Both regression-tested. (1) is not fixable in Veil
+  and is documented.
+- **Live result:** BLOCKED. The canonical schema was accepted in one live structured call, and the E2E runs failed
+  closed at the planner (nothing executed, vault cleared, dashboard truthful, 0/18 canaries), but no planner step
+  succeeded, so parity is not shown live and Groq remains the default.
+- **Security/privacy implications:** none weakened. Gemini receives exactly the prompt text Groq receives (tested).
+  The key is server-side only, passed explicitly, and never logged or echoed. The extension and dashboard are
+  unchanged. Only metadata is logged.
+- **Documentation updated:** README (provider seam, setup, configuration, tests, limitations), CLAUDE.md, PROJECT_CONTEXT,
+  PROGRESS, this file. ROADMAP unchanged (no milestone affected).
+- **Git commit:** none (the user reviews and commits).

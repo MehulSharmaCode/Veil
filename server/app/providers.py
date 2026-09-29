@@ -1,5 +1,6 @@
-"""LLM provider adapter. One real implementation (Groq, OpenAI-compatible REST API via httpx).
-Test stubs live in tests/ only."""
+"""LLM provider adapters behind one seam (`PlannerProvider`). Two real implementations, selected by
+`VEIL_PROVIDER`: Groq (OpenAI-compatible REST API via httpx) and Gemini (official `google-genai` SDK,
+stateless `generateContent`). Test stubs live in tests/ only."""
 
 from __future__ import annotations
 
@@ -12,6 +13,9 @@ from dataclasses import dataclass
 from typing import Any, Callable, Protocol
 
 import httpx
+from google import genai
+from google.genai import errors as genai_errors
+from google.genai import types as genai_types
 
 log = logging.getLogger("veil")
 
@@ -282,3 +286,221 @@ def _retry_after(r: httpx.Response) -> float | None:
     except ValueError:
         return None
     return v if v >= 0 else None
+
+
+# ---- Gemini -------------------------------------------------------------------------------------
+
+GEMINI_EFFORTS = ("low", "medium", "high")  # thinking_level values documented for gemini-3.x Flash
+# Retryable per the Gemini API error guide: 429 RESOURCE_EXHAUSTED (handled separately), 408 and 5xx.
+GEMINI_RETRYABLE = (408, 500, 502, 503, 504)
+# Gemini answers an invalid key with HTTP 400 INVALID_ARGUMENT and an ErrorInfo reason, not with 401.
+GEMINI_KEY_REASONS = ("API_KEY_INVALID", "API_KEY_SERVICE_BLOCKED", "API_KEY_HTTP_REFERRER_BLOCKED")
+# The Gemini API rejects a request whose server deadline is under 10 s with HTTP 400 INVALID_ARGUMENT
+# ("Manually set deadline 5s is too short. Minimum allowed deadline is 10s.", observed live 2026-09-29),
+# so an attempt is only started, or waited for, when at least this much of the call budget is left.
+GEMINI_MIN_DEADLINE_S = 10.0
+_RETRY_DELAY_RE = re.compile(r"^(\d{1,5}(?:\.\d{1,9})?)s$")
+
+
+class GeminiProvider:
+    """Gemini `generateContent` (stateless: nothing is stored server-side for later turns) with the
+    canonical response JSON Schema as `response_json_schema`, through the official `google-genai` SDK.
+
+    Same contract as GroqProvider: only the gate-checked, sanitized prompt is sent; error messages are
+    fixed strings plus status codes, never request/response content; the SDK's own retries and automatic
+    function calling are off, so this class alone decides attempts, waits and timeouts, within the same
+    budget (ATTEMPT_TIMEOUT_S / CALL_BUDGET_S / MAX_ATTEMPTS)."""
+
+    name = "gemini"
+
+    def __init__(
+        self,
+        api_key: str,
+        model: str,
+        effort: str = "medium",
+        *,
+        max_output_tokens: int = 4096,
+        attempt_timeout_s: float = ATTEMPT_TIMEOUT_S,
+        call_budget_s: float = CALL_BUDGET_S,
+        max_attempts: int = MAX_ATTEMPTS,
+        transport: httpx.BaseTransport | None = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
+    ) -> None:
+        if not api_key:
+            raise ValueError("GEMINI_API_KEY is empty")
+        if effort not in GEMINI_EFFORTS:
+            raise ValueError(f"VEIL_EFFORT must be one of {', '.join(GEMINI_EFFORTS)}")
+        self.model = model
+        self.effort = effort
+        self.max_output_tokens = max_output_tokens
+        self.attempt_timeout_s = attempt_timeout_s
+        self.call_budget_s = call_budget_s
+        self.max_attempts = max_attempts
+        self._clock = clock
+        self._sleep = sleep
+        # The key is passed explicitly: the SDK would otherwise prefer GOOGLE_API_KEY from the environment.
+        self._client = genai.Client(
+            api_key=api_key,
+            http_options=genai_types.HttpOptions(
+                retry_options=genai_types.HttpRetryOptions(attempts=1),
+                client_args={"transport": transport} if transport is not None else None,
+            ),
+        )
+
+    def _config(self, system: str, schema: dict[str, Any], timeout_s: float) -> genai_types.GenerateContentConfig:
+        return genai_types.GenerateContentConfig(
+            system_instruction=system,
+            response_mime_type="application/json",
+            response_json_schema=schema,  # the canonical schema, unmodified
+            thinking_config=genai_types.ThinkingConfig(thinking_level=self.effort.upper()),
+            max_output_tokens=self.max_output_tokens,
+            candidate_count=1,
+            automatic_function_calling=genai_types.AutomaticFunctionCallingConfig(disable=True),
+            http_options=genai_types.HttpOptions(timeout=max(1, int(timeout_s * 1000))),
+        )
+
+    @staticmethod
+    def _contents(turns: list[ChatTurn]) -> list[genai_types.Content]:
+        return [genai_types.Content(role="model" if t.role == "assistant" else "user", parts=[genai_types.Part(text=t.content)]) for t in turns]
+
+    def complete_json(self, system: str, turns: list[ChatTurn], schema: dict[str, Any]) -> str:
+        contents = self._contents(turns)
+        deadline = self._clock() + self.call_budget_s
+        last_error = "Could not reach the LLM provider"
+
+        for attempt in range(1, self.max_attempts + 1):
+            remaining = deadline - self._clock()
+            if remaining < GEMINI_MIN_DEADLINE_S:
+                break
+            config = self._config(system, schema, min(self.attempt_timeout_s, remaining))
+            try:
+                response = self._client.models.generate_content(model=self.model, contents=contents, config=config)
+            except httpx.TimeoutException:
+                last_error = "LLM provider timed out"
+                log.warning("gemini attempt %d: timeout", attempt)
+                continue
+            except httpx.HTTPError:
+                last_error = "Could not reach the LLM provider"
+                log.warning("gemini attempt %d: connection error", attempt)
+                self._wait(BACKOFF_S, deadline)
+                continue
+            except genai_errors.APIError as e:
+                # str(e) embeds the response body (it may contain model output): only the numeric code and
+                # identifier-shaped status/reason are read, and only those are logged.
+                code = e.code if isinstance(e.code, int) else 0
+                status = _identifier(e.status)
+                reason = _gemini_reason(e.details)
+                log.warning("gemini attempt %d: HTTP %d%s%s", attempt, code, f" ({status})" if status else "", f" [{reason}]" if reason else "")
+                if code in (401, 403) or reason in GEMINI_KEY_REASONS:
+                    raise ProviderError("LLM provider rejected the API key (check GEMINI_API_KEY in server/.env)") from None
+                if code == 429:
+                    if _gemini_daily_quota(e.details):
+                        # A per-day quota (the free tier allows 20 requests/day/model): waiting cannot help,
+                        # whatever retryDelay says.
+                        raise ProviderError("LLM provider daily request quota exhausted (see ai.dev/rate-limit)") from None
+                    wait = _gemini_retry_after(e)
+                    if wait is None or not self._wait(wait, deadline):
+                        hint = f"; retry in ~{int(wait + 0.999)} s" if wait is not None else ""
+                        raise ProviderError(f"LLM provider rate limit reached{hint}") from None
+                    last_error = "LLM provider rate limit reached"
+                    continue
+                if code in GEMINI_RETRYABLE:
+                    last_error = f"LLM provider error (HTTP {code})"
+                    self._wait(BACKOFF_S, deadline)
+                    continue
+                if code == 404:
+                    raise ProviderError("LLM provider does not know this model (check VEIL_MODEL)") from None
+                # 400 INVALID_ARGUMENT / FAILED_PRECONDITION etc.: not retryable.
+                raise ProviderError(f"LLM provider error (HTTP {code})") from None
+            except Exception as e:  # noqa: BLE001 - SDK parse/validation failures: fail closed, never echo
+                log.warning("gemini attempt %d: unexpected %s", attempt, type(e).__name__)
+                raise ProviderError("LLM provider returned an unexpected response") from None
+            return self._extract(response)
+
+        raise ProviderError(f"{last_error} (gave up within {int(self.call_budget_s)} s)")
+
+    def _wait(self, seconds: float, deadline: float) -> bool:
+        """Sleep if the wait still leaves time for another attempt (with Gemini's minimum deadline)."""
+        if self._clock() + seconds + GEMINI_MIN_DEADLINE_S > deadline:
+            return False
+        self._sleep(seconds)
+        return True
+
+    @staticmethod
+    def _extract(response: Any) -> str:
+        """The model's answer text: the non-thought text parts of the single candidate. Anything else
+        (a blocked prompt, a safety/recitation stop, truncation, no candidate, no text) is an error."""
+        feedback = getattr(response, "prompt_feedback", None)
+        if feedback is not None and getattr(feedback, "block_reason", None):
+            raise ProviderError("The model declined to plan this step")
+        candidates = getattr(response, "candidates", None)
+        if not isinstance(candidates, list) or not candidates:
+            raise ProviderError("LLM provider returned an unexpected response")
+        candidate = candidates[0]
+        finish = getattr(candidate.finish_reason, "value", candidate.finish_reason)
+        if finish == "MAX_TOKENS":
+            raise ProviderError("The model's response was truncated")
+        if finish != "STOP":
+            # SAFETY, RECITATION, BLOCKLIST, PROHIBITED_CONTENT, SPII, OTHER, unknown future values…
+            raise ProviderError("The model declined to plan this step")
+        parts = getattr(candidate.content, "parts", None) or []
+        text = "".join(p.text for p in parts if isinstance(getattr(p, "text", None), str) and not getattr(p, "thought", False))
+        if not text.strip():
+            raise ProviderError("The model returned no text output")
+        return text
+
+
+_IDENT_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,63}$")
+
+
+def _identifier(v: Any) -> str | None:
+    """An UPPER_SNAKE identifier (a gRPC status or ErrorInfo reason), else None. Nothing else is kept."""
+    return v if isinstance(v, str) and _IDENT_RE.match(v) else None
+
+
+def _gemini_details(details: Any) -> list[Any]:
+    error = details.get("error") if isinstance(details, dict) else None
+    items = error.get("details") if isinstance(error, dict) else None
+    return items if isinstance(items, list) else []
+
+
+def _gemini_reason(details: Any) -> str | None:
+    """The `reason` of a google.rpc.ErrorInfo detail (e.g. API_KEY_INVALID), if identifier-shaped."""
+    for d in _gemini_details(details):
+        if isinstance(d, dict) and str(d.get("@type", "")).endswith("google.rpc.ErrorInfo"):
+            return _identifier(d.get("reason"))
+    return None
+
+
+_QUOTA_ID_RE = re.compile(r"^[A-Za-z0-9_-]{1,120}$")
+
+
+def _gemini_daily_quota(details: Any) -> bool:
+    """Whether a 429's google.rpc.QuotaFailure names a per-day quota (e.g.
+    GenerateRequestsPerDayPerProjectPerModel-FreeTier). Only identifier-shaped ids are inspected."""
+    for d in _gemini_details(details):
+        if isinstance(d, dict) and str(d.get("@type", "")).endswith("google.rpc.QuotaFailure"):
+            for v in d.get("violations") or []:
+                qid = v.get("quotaId") if isinstance(v, dict) else None
+                if isinstance(qid, str) and _QUOTA_ID_RE.match(qid) and "PerDay" in qid:
+                    return True
+    return False
+
+
+def _gemini_retry_after(e: genai_errors.APIError) -> float | None:
+    """Seconds to wait from a 429: the `retry-after` header, else a google.rpc.RetryInfo `retryDelay`."""
+    headers = getattr(getattr(e, "response", None), "headers", None)
+    if headers is not None:
+        try:
+            v = float(headers.get("retry-after", ""))
+            if v >= 0:
+                return v
+        except (TypeError, ValueError):
+            pass
+    for d in _gemini_details(e.details):
+        if isinstance(d, dict) and str(d.get("@type", "")).endswith("google.rpc.RetryInfo"):
+            m = _RETRY_DELAY_RE.match(str(d.get("retryDelay", "")))
+            if m:
+                return float(m.group(1))
+    return None

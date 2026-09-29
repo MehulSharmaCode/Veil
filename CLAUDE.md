@@ -16,7 +16,10 @@ SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-we
 >   device boundary, privacy boundary, "AI proposes, VEIL decides". See PROGRESS → "Dashboard redesign 2026-09-29".
 > - **Release-candidate validation passed** (2026-09-29): tests, `make leaks` 0/19, live Groq smoke run to DONE,
 >   dashboard checked in Chrome; committed as "Finalize Veil Phase 1 hardening and dashboard".
-> - **Next:** discuss the next phase with the user.
+> - **Task 2, Gemini planner provider** (2026-09-29, uncommitted): `GeminiProvider` behind the provider seam,
+>   `VEIL_PROVIDER=groq|gemini` (Groq stays the default). Unit/parity/leak tests pass; **live validation BLOCKED** by
+>   Gemini capacity and the free tier's 20 requests/day. See PROGRESS → "Task 2: Gemini provider".
+> - **Next:** finish Task 2's live matrix when the quota allows, then discuss the next phase with the user.
 > - **Do not start OCR/vision or other new features on your own.**
 
 VEIL is a Chrome MV3 extension that performs web tasks for a user ("fill my email and address, don't submit")
@@ -82,8 +85,9 @@ side panel (orchestrator, owns vault)            content script (top frame, loca
 - `schemas.py` (pydantic mirror of the extension schemas, `extra="forbid"`).
 - `prompt.py` (`SYSTEM_PROMPT`, `build_user_message` with `<untrusted_page_data>`, `RESPONSE_SCHEMA`).
 - `planner.py` (validate, then one repair, then 502).
-- `providers.py` (`PlannerProvider` protocol + `GroqProvider`; **the provider seam**; bounded timeout/retry budget;
-  provider-local strict-schema adaptation).
+- `providers.py` (`PlannerProvider` protocol + `GroqProvider` + `GeminiProvider`, selected by `VEIL_PROVIDER`;
+  **the provider seam**; bounded timeout/retry budget; Groq-local strict-schema adaptation; Gemini uses the canonical
+  schema unchanged via the official `google-genai` SDK, stateless `generateContent`).
 - `config.py` (`.env`).
 - `telemetry.py` (relay).
 
@@ -149,7 +153,8 @@ Link to other files rather than copying content between them.
 
 ```sh
 make setup       # npm install, server/.venv + requirements, copies .env.example → server/.env if missing
-# put the planner API key in server/.env yourself (GROQ_API_KEY; model/effort via VEIL_MODEL/VEIL_EFFORT)
+# put the planner API key in server/.env yourself: VEIL_PROVIDER=groq|gemini, GROQ_API_KEY or GEMINI_API_KEY
+# (model/effort via VEIL_MODEL/VEIL_EFFORT; VEIL_MODEL unset = the provider's default model)
 
 make dev         # builds extension, then server :8000 + demo :8080 + dashboard :8090 (Ctrl-C stops all)
 make ext         # rebuild extension → extension/dist   (make ext-watch; static/ copied only at start)

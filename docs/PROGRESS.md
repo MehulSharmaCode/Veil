@@ -29,6 +29,9 @@
 - **Dashboard UI/UX redesign done (2026-09-29, presentation only).** The dashboard now reads as a proof console in
   story order, with a two-lane pipeline split by the device boundary. No telemetry, reducer, transport or agent
   change. See "Dashboard redesign 2026-09-29" below.
+- **Task 2, Gemini provider (2026-09-29, uncommitted):** `GeminiProvider` added behind the provider seam
+  (`VEIL_PROVIDER=gemini`); Groq stays the default. **Live validation BLOCKED** by Gemini capacity (503/504) and the
+  free tier's 20 requests/day quota. See "Task 2: Gemini provider" below.
 - **Release-candidate validation passed (2026-09-29):** `make test`, `make leaks` 0/19, a live Groq smoke run to DONE
   and a Chrome check of the dashboard. See "Release-candidate validation 2026-09-29" below.
 
@@ -42,8 +45,10 @@
 1. Review `docs/PROJECT_CONTEXT.md`, this file and `git status`.
 2. Optional: a human repeats one task by hand, using the toolbar icon and the panel's own close button. These two UI
    entry points were not exercised by the automated runs.
-3. Discuss the next phase with the user (ROADMAP §2 real-website compatibility or later sections).
-4. **Do not** start OCR/vision (ROADMAP §3) or any other new feature on your own.
+3. Finish Task 2 when the Gemini quota allows ("Task 2: Gemini provider" → "To finish"); the user reviews and
+   commits the Task 2 changes.
+4. Discuss the next phase with the user (ROADMAP §2 real-website compatibility or later sections).
+5. **Do not** start OCR/vision (ROADMAP §3) or any other new feature on your own.
 
 **Dev notes for the next session:**
 - **Values in harness output:** `node scripts/e2e_cdp.mjs` reports the demo form as filled/empty only (the
@@ -564,6 +569,102 @@ no feature, agent, extension, server, reducer or telemetry change.
 - The first complete live DONE on the redesigned dashboard; Save/Deny on the redesigned dashboard is still
   fixture-only (open item 11).
 
+## Task 2: Gemini provider (2026-09-29)
+
+**Goal:** add Gemini as the planner provider behind the existing `PlannerProvider` seam, without changing the
+architecture, the privacy pipeline, the canonical schemas, action semantics or browser behaviour; keep Groq as the
+rollback; make Gemini the default only after live parity.
+
+**Status: implemented, unit/parity/leak-tested; LIVE VALIDATION BLOCKED** (provider capacity, then the free-tier daily
+quota). Groq remains the default. Uncommitted.
+
+**Research (official docs, 2026-09-29):**
+- SDK: `google-genai` (the legacy `google-generativeai` is not used). Latest 2.25.0 (released 2026-09-22), Python
+  ≥ 3.10, httpx-based. It reads `GEMINI_API_KEY` or `GOOGLE_API_KEY` from the environment (`GOOGLE_API_KEY` wins),
+  so Veil passes the key explicitly.
+- Model: `gemini-3.8-flash` is listed as a **stable** model id.
+- Structured output: a JSON Schema subset (`type` incl. type arrays, `properties`, `required`,
+  `additionalProperties`, `items`, `enum`, `anyOf`, …). The docs now lead with the **Interactions API**, which is GA
+  and "recommended for all new projects", but **stores requests server-side by default** (1 day free tier, 55 days
+  paid) unless `store=false`. `generateContent` is "legacy" but "fully supported" and stateless. Veil uses
+  `generateContent`: its planner is stateless per step, and no stored-state flag has to stay correct for privacy.
+- Thinking: `thinking_level` (`low`/`medium`/`high`, default medium) for Gemini 3.x Flash.
+- SDK behaviour checked in its source: without `retry_options` it makes 1 attempt; its only content-bearing logs are
+  DEBUG chunk dumps on the streaming path (not used); `APIError` text embeds the response body.
+
+**Implementation (server only):**
+- `app/providers.py`: `GeminiProvider` (`name = "gemini"`), same `complete_json(system, turns, schema) -> str`
+  contract as `GroqProvider`. The system prompt goes in `system_instruction`, turns map `assistant` → `model`, the
+  canonical `RESPONSE_SCHEMA` goes unchanged as `response_json_schema`, `VEIL_EFFORT` → `thinking_level`, 1
+  candidate, 4096 output tokens, SDK retries off (`attempts=1`), automatic function calling off, per-attempt timeout
+  via `http_options`. Only non-thought text parts are returned; a blocked prompt, a non-`STOP` finish (safety,
+  recitation, unknown), `MAX_TOKENS`, no candidate or no text is a `ProviderError`. Nothing SDK-typed leaves the
+  provider.
+- Error mapping (Gemini's model, not Groq's): 401/403 or 400 with ErrorInfo `API_KEY_INVALID` → key error; 429 →
+  `retry-after` header or RetryInfo `retryDelay`, waited only within the budget, and a **per-day** QuotaFailure fails
+  at once; 408/5xx → retried; 404 → "check VEIL_MODEL"; other 4xx → not retried. Messages are fixed strings plus the
+  status code; only the numeric code and identifier-shaped status/reason are logged; the SDK error is suppressed
+  (`raise … from None`).
+- Same budget as Groq (20 s / 25 s / 3 attempts, `2 × 25 s < 60 s`), with one Gemini-specific rule: no attempt, or
+  wait before one, when under 10 s of the budget is left.
+- `app/config.py`: `VEIL_PROVIDER` (`groq` default | `gemini`), `GEMINI_API_KEY`, `VEIL_MODEL` optional with a default
+  per provider; each provider uses only its own key. `app/main.py`: `build_provider()`; an unknown provider refuses
+  to start; the 503 names the missing key variable. `/health` is unchanged in shape and reports `provider: gemini`.
+- `requirements.txt`: `google-genai>=2.25,<3` (installed 2.25.0; it added only its own transitive packages, and no
+  existing package changed). `.env.example`: the new variables.
+- Unchanged: `prompt.py`, `schemas.py`, `planner.py`, the extension (the `/health` planner metadata already passes
+  any identifier-like provider/model), the dashboard, telemetry.
+
+**Tests (pytest 57 → 133, no network):**
+- `tests/test_gemini_provider.py` (49): configuration (missing/empty key, invalid effort, unknown provider, per-provider
+  key and default model, ambient `GOOGLE_API_KEY` ignored), request shape, repair turn role, type/DONE/ASK_USER
+  responses, thought parts, split text, malformed and schema-invalid output (repair, never coerced), unusable
+  responses, auth/400/404 errors, 429 via header/RetryInfo/daily quota/no hint, transient 5xx, bounded retries,
+  timeouts, the 10 s minimum deadline, the worst-case budget, and a 502 with no action.
+- `tests/test_provider_parity.py` (27): for all 8 canonical action shapes the same sanitized payload gives the same
+  `PlanResponse` through both real providers; both send exactly the same system and user text (including the repair
+  turn); the same failure class gives the same error; the `scripts/check_leaks.py` seeds planted in 12 kinds of
+  Gemini failure never reach the exception, the 502 detail or any log record (DEBUG included), and neither does the
+  API key; a payload with a raw value field is refused (422) before any provider is called. A mutation check (echoing
+  the error body) turned the leak test red.
+
+**Live attempts (visible behaviour recorded as observed; seeded synthetic values only):**
+
+| When | What | Result |
+|---|---|---|
+| 15:2x | `/plan` with the test fixture payload | 503 UNAVAILABLE ×3 → 502 after 6.8 s (fail closed) |
+| 15:2x | direct SDK, trivial prompt, plain and with the canonical schema | 503 "This model is currently experiencing high demand" for both → provider capacity, not schema |
+| 15:32 | trivial prompt | OK in 16.2 s |
+| 15:3x | `/plan` again | 503 ×3 → 502 after 8.6 s |
+| 15:3x | trivial prompt ×2, plain and with schema | 504 ×2 (~24 s); 503; **schema call OK in 16.5 s with a valid canonical `done` plan**: Gemini accepts the canonical schema unchanged |
+| 15:40 | E2E task (email + address seeds in the text) | step 1: 503, 503, then **HTTP 400**, task FAILED at the planner, nothing executed |
+| 15:4x | diagnosis | 400 = "Manually set deadline 5s is too short. Minimum allowed deadline is 10s." (3/5/9 s all rejected) → **code issue**: late attempts carried the leftover budget. Fixed (no attempt under 10 s), test added |
+| 15:42 | E2E task again, fixed provider | 503, 503, timeout → FAILED at the planner after 25.0 s (the real error, no longer masked) |
+| 15:45–15:48 | availability polling | 504, 504, then **429 RESOURCE_EXHAUSTED: `GenerateRequestsPerDayPerProjectPerModel-FreeTier`, limit 20** (with a misleading `retryDelay` of 57 s) → per-day quota now fails at once, test added |
+
+- Every failed run failed closed: no action proposed, nothing executed, vault cleared, the dashboard showed
+  `gemini · gemini-3.8-flash · effort medium`, FAILED at the LLM planner and later stages "not reached"; 0/18
+  canaries on the dashboard; 0 causal-order violations.
+- `make leaks` afterwards: **0/19** over 140 planner payloads (including those sent to Gemini) and the latest (Gemini)
+  session's telemetry. Server logs: 0 seeded values, 0 key-like strings, 0 automatic-function-calling warnings.
+
+**Latency (measured, not a quality judgement):**
+- Gemini `gemini-3.8-flash`: no planner step completed. Successful trivial calls: 16.2 s and 16.5 s. Failures:
+  503 after 1–3 s, 504 after ~20–24 s.
+- Groq baseline, same demo task, same day (release-candidate smoke): 3 planner calls of 1057 / 807 / 920 ms, 3.4 s
+  task, 1 attempt each.
+
+**To finish Task 2 (when quota and capacity allow):**
+1. `VEIL_PROVIDER=gemini VEIL_MODEL=gemini-3.8-flash make dev` (or set them in `server/.env`), then
+   `curl -s localhost:8000/health` → `"provider":"gemini"`.
+2. Run, with the dashboard open: the seeded email + address task (type ×2, placeholder resolution, verification,
+   DONE); "Fill my email and address. Do not submit." with `--answer` = the `task:address` seed (ASK_USER,
+   continuation); a scroll task ("Scroll down to the Save button, do not click it."); Save + `--confirm deny`
+   (submit protection). The demo page has no `<select>`; SELECT and WAIT are covered by the parity tests only.
+3. `make leaks`; record per-step planner latency, attempts and total duration.
+4. Only if these pass: change `DEFAULT_PROVIDER` to `gemini` (and the docs). Budget: about 15 requests for this
+   matrix, within the 20/day free tier, if no retries are needed.
+
 ## Test results (latest: 2026-09-29)
 
 | Suite | Result |
@@ -573,6 +674,9 @@ no feature, agent, extension, server, reducer or telemetry change.
 | pytest: payload validation, response validation + repair (test-only stub), provider errors → 502, no provider → 503, telemetry relay, CORS; GroqProvider request shape, strict-schema rules + scroll merge/restore, error mapping, 429/5xx/timeout retries within budget (MockTransport, no network) | ✅ 54/54 |
 | dashboard reducer (node:test): success, denied Save, Stop → INTERRUPTED, panel close, egress block, planner/schema failure, no fabricated progress, unknown events, payload re-check | ✅ 8/8 |
 | `scripts/check_leaks.py --telemetry` (real Groq runs, post-fix) | ✅ 0/9 |
+
+**After Task 2, Gemini provider (2026-09-29):** `make test`: `tsc` clean, vitest **116/116**, pytest **133/133**
+(1 deprecation warning), dashboard node:test **14/14**. `make leaks` **0/19** over 140 payloads.
 
 **Release-candidate validation (2026-09-29):** `make test`: `tsc` clean, vitest **116/116**, pytest **57/57**
 (1 deprecation warning), dashboard node:test **14/14**. `make leaks` **0/19** over 128 payloads.
@@ -620,6 +724,10 @@ new `agent.test.ts`), pytest **57/57**, dashboard node:test **14/14**. `make lea
 | 09-23 | Verification failure → re-snapshot + re-plan; 2 consecutive failures → `ask_user` | "Retry once with a fresh snapshot" without blindly repeating clicks. |
 | 09-23 | Executes are never re-sent; a click that kills the message channel (navigation) counts as "changed" | Avoid double-submits. |
 | 09-23 | E2E driver uses CDP over `--remote-debugging-pipe`, no npm deps | Chrome ≥137 ignores `--load-extension`. |
+| 09-29 | Gemini added as a second provider behind `PlannerProvider`, selected by `VEIL_PROVIDER`; Groq stays the default until Gemini passes live validation | Controlled migration with a one-variable rollback; no architecture, schema or extension change. |
+| 09-29 | Gemini via the official `google-genai` SDK and stateless `generateContent`, not the Interactions API | The Interactions API stores requests server-side by default; the planner is stateless per step. |
+| 09-29 | Gemini gets the canonical response schema unchanged (no adaptation layer) | Accepted live; a provider-local adaptation would only be added if Gemini rejected it. |
+| 09-29 | Gemini attempts need ≥ 10 s of budget; per-day quota 429s fail at once | Gemini rejects server deadlines under 10 s (HTTP 400); a daily quota cannot be waited out. |
 | 09-29 | Dashboard redesign is presentation only: same reducer, events and transport; layout follows the story, the pipeline is split by the device boundary | A judge must understand the privacy story unaided, without any status meaning more than an event proves. |
 
 ## Open items (as of 2026-09-29)
@@ -658,6 +766,13 @@ new `agent.test.ts`), pytest **57/57**, dashboard node:test **14/14**. `make lea
     2026-09-29). It was checked with the reducer's test fixtures; re-run test C from "Live validation 2026-09-28"
     with the dashboard open when the quota allows. A complete live DONE was seen on 2026-09-29 (see
     "Release-candidate validation 2026-09-29").
+
+12. **Gemini live validation is BLOCKED** (Task 2). No live planner step through `GeminiProvider` has succeeded:
+    `gemini-3.8-flash` answered 503/504 under high demand, then the free tier's **20 requests/day/model** quota ran
+    out. The canonical schema was accepted in one live structured call. Remaining: "Task 2: Gemini provider" →
+    "To finish".
+13. **Gemini free-tier capacity:** 20 requests per day per model, and every attempt counts (a 3-step task uses at
+    least 3); successful calls took ~16 s on 2026-09-29. This limits demos far more than Groq's free tier.
 
 **Other known limitations, carried over from the v0.1 build and unchanged:**
 - **Detection (no NER):**

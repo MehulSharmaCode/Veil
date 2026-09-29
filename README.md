@@ -183,14 +183,21 @@ same egress gate as planner requests, so it shows placeholders, categories and c
 - **`/telemetry/*`:** an in-memory relay on a separate router (`POST /events`, `GET /state`, SSE `GET /stream`).
   CORS allows `GET` from the dashboard origin only.
 
-The LLM provider sits behind the `PlannerProvider` protocol in `server/app/providers.py`. The current implementation is
-`GroqProvider`:
-- It calls Groq's chat-completions REST API with `httpx`, using strict JSON Schema structured output and a
-  configurable reasoning effort.
-- Time is bounded: 20 s per HTTP attempt, 25 s per call, at most 3 attempts. With the one repair call, a `/plan`
-  request therefore finishes before the extension's 60 s deadline.
-- Groq's strict mode rejects `anyOf` variants that share a `type` value, so the provider merges the two `scroll`
-  variants for the request and maps the output back. The canonical schema and validators are unchanged.
+The LLM provider sits behind the `PlannerProvider` protocol in `server/app/providers.py`. `VEIL_PROVIDER` selects one
+of two implementations (the default is `groq`); nothing else in the backend, the extension or the dashboard depends
+on which one runs:
+- **`GroqProvider`** calls Groq's chat-completions REST API with `httpx`, using strict JSON Schema structured output
+  and a configurable reasoning effort. Groq's strict mode rejects `anyOf` variants that share a `type` value, so the
+  provider merges the two `scroll` variants for the request and maps the output back.
+- **`GeminiProvider`** calls Gemini's stateless `generateContent` through the official `google-genai` SDK, with the
+  canonical response schema as `response_json_schema` (Gemini accepts it unchanged, so there is no adaptation layer)
+  and `VEIL_EFFORT` as the thinking level. The SDK's own retries and automatic function calling are turned off, and
+  the stateful Interactions API (which stores requests server-side by default) is not used.
+- Both use the same time budget: 20 s per HTTP attempt, 25 s per call, at most 3 attempts. With the one repair call,
+  a `/plan` request therefore finishes before the extension's 60 s deadline. (Gemini rejects server deadlines under
+  10 s, so its provider only starts an attempt when at least 10 s of the budget are left.)
+- Both return the raw JSON text; the canonical pydantic model (`PlanResponse`) and then the extension's zod schema and
+  local validator judge it. Provider errors become fixed messages with status codes only, never response content.
 
 The provider only ever receives the gate-checked sanitized payload, so swapping providers does not move the privacy
 boundary.
@@ -283,10 +290,10 @@ Veil/
 │   │   ├── schemas.py         #   pydantic mirror of the extension schemas (extra="forbid")
 │   │   ├── prompt.py          #   system prompt, <untrusted_page_data> framing, response JSON schema
 │   │   ├── planner.py         #   validate → one repair → 502
-│   │   ├── providers.py       #   PlannerProvider protocol + GroqProvider (the provider seam)
+│   │   ├── providers.py       #   PlannerProvider protocol + GroqProvider + GeminiProvider (the provider seam)
 │   │   ├── config.py          #   settings from server/.env
 │   │   └── telemetry.py       #   in-memory telemetry relay + SSE
-│   ├── tests/                 # pytest (includes a test-only scripted provider)
+│   ├── tests/                 # pytest (test-only scripted provider; Groq/Gemini on mocked HTTP; parity + leak tests)
 │   ├── requirements.txt
 │   └── .env.example           # template for server/.env (no key)
 ├── demo-site/                 # B. Controlled test fixture (static, :8080)
@@ -323,8 +330,10 @@ Veil/
 Notes:
 - The Makefile and run instructions are written for **macOS**, and the E2E driver defaults to the macOS Chrome path.
   Override it with the `CHROME` environment variable on other systems. Other platforms have not been tested.
-- A **Groq API key** (console.groq.com) is needed for the live planner. The free tier works, but see the rate-limit
-  note under [Current limitations](#current-limitations). Everything except planning runs without a key.
+- A planner API key is needed for the live planner: a **Groq API key** (console.groq.com) for the default provider,
+  or a **Gemini API key** (aistudio.google.com) with `VEIL_PROVIDER=gemini`. The free tiers work, but see the
+  rate-limit and availability notes under [Current limitations](#current-limitations). Everything except planning
+  runs without a key.
 
 ---
 
@@ -346,7 +355,7 @@ make setup
 This runs:
 1. `npm install` in `extension/` (esbuild, TypeScript, vitest, `@types/chrome`, zod).
 2. `python3 -m venv server/.venv` and `pip install -r server/requirements.txt` (FastAPI, uvicorn, pydantic,
-   python-dotenv, httpx, pytest).
+   python-dotenv, httpx, google-genai, pytest).
 3. Copies `server/.env.example` to `server/.env` **only if `server/.env` does not already exist**.
 
 ### Configure the backend (`server/.env`)
@@ -356,14 +365,20 @@ key in the extension.
 
 | Variable | Default | Purpose |
 |---|---|---|
-| `GROQ_API_KEY` | *(empty)* | Groq API key for `GroqProvider`. If empty, no provider is built: `/health` reports `planner_configured: false` and `/plan` returns 503. |
-| `VEIL_MODEL` | `openai/gpt-oss-20b` | Groq model id. It must support strict JSON Schema output. |
-| `VEIL_EFFORT` | `medium` | Reasoning effort: `low` \| `medium` \| `high`. |
+| `VEIL_PROVIDER` | `groq` | Planner provider: `groq` \| `gemini`. Any other value stops the server at startup. Switching back is the rollback. |
+| `GROQ_API_KEY` | *(empty)* | Groq API key, used when `VEIL_PROVIDER=groq`. |
+| `GEMINI_API_KEY` | *(empty)* | Gemini API key, used when `VEIL_PROVIDER=gemini` (passed to the SDK explicitly; an ambient `GOOGLE_API_KEY` is not used). |
+| `VEIL_MODEL` | per provider | Model id. Unset: `openai/gpt-oss-20b` (Groq) or `gemini-3.8-flash` (Gemini). Set it only to override; when switching providers, change or remove it too. |
+| `VEIL_EFFORT` | `medium` | `low` \| `medium` \| `high`: Groq `reasoning_effort` or Gemini `thinking_level`. |
 | `VEIL_DEV_LOG_PAYLOADS` | `1` | Dev only: append each received `/plan` payload to `server/logs/received_payloads.jsonl` (used by the leak check). |
 | `VEIL_DASHBOARD_ORIGIN` | `http://localhost:8090,http://127.0.0.1:8090` | Origins allowed by CORS (dashboard GETs). |
 
+If the selected provider's key is empty, no provider is built: `/health` reports `planner_configured: false` and
+`/plan` returns 503 naming the missing variable.
+
 Edit `server/.env` in your own editor. After editing it, restart `make dev`, then check the backend with
-`curl -s localhost:8000/health`. It should report `"planner_configured":true,"provider":"groq"`.
+`curl -s localhost:8000/health`. It should report `"planner_configured":true` and the provider you selected
+(`"provider":"groq"` or `"provider":"gemini"`).
 
 ---
 
@@ -476,7 +491,17 @@ What the suites cover:
   - provider errors → 502, no provider → 503;
   - the telemetry relay and CORS;
   - `GroqProvider`: request shape, strict-schema rules and the scroll merge/restore, error mapping, and
-    429/5xx/timeout/`json_validate_failed` retries within the budget. These tests use `httpx.MockTransport`: no network, no key.
+    429/5xx/timeout/`json_validate_failed` retries within the budget;
+  - `GeminiProvider` (the real `google-genai` SDK): request shape (stateless `generateContent`, canonical schema,
+    explicit key), DONE/ASK_USER/type responses, thought parts, blocked/truncated/safety/empty responses, key and
+    model errors, 429 `retry-after`/`RetryInfo`, 5xx and timeout retries within the budget, the 10 s minimum
+    deadline, provider selection and the missing-key 503;
+  - provider parity: the same sanitized request through both providers gives the same canonical plan for every
+    action type, the same prompt text on the wire (including the repair turn) and the same error for the same
+    failure;
+  - seeded leak tests: the `scripts/check_leaks.py` seeds planted in every Gemini failure body never reach the
+    exception, the 502 detail or any log record (even at DEBUG), and never the API key either.
+  - These tests use `httpx.MockTransport`: no network, no key.
 - **node:test (dashboard):** the reducer that turns events into the dashboard's state. It covers the success path,
   denied Save, Stop while planning, panel close, egress block, planner failure, no fabricated progress, unknown future
   events, the payload re-check, out-of-order arrival, in-flight and after-Stop actions, "N/A this step" versus
@@ -523,6 +548,11 @@ address detection, and the result above is from after the fix.
   hit HTTP 429.
   - The provider waits out `retry-after` only within its 25 s budget, which made one step take about 20 s in testing.
   - If the wait doesn't fit, the task stops with "Planner error: … rate limit reached".
+- **Gemini (`gemini-3.8-flash`) is not yet validated live.** On 2026-09-29 the model often answered HTTP 503
+  ("experiencing high demand") or 504, successful calls took about 16 s, and the free tier allows only **20 requests
+  per day per model** (every attempt counts). A step whose attempts all fail within the 25 s budget ends the task
+  with a planner error (fail closed: no action is taken). Groq therefore stays the default. Details:
+  `docs/PROGRESS.md` → "Task 2: Gemini provider".
 - **Detection is heuristic; there is no NER.**
   - Names are found through contextual cues, or as the answer to a name question.
   - Addresses are found through cues ("my address is …", "address …", "… as my address", "… in the address field"),

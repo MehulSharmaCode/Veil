@@ -2,5 +2,6 @@ fastapi>=0.141
 uvicorn>=0.53
 pydantic>=2.13
 python-dotenv>=1.2
-httpx>=0.28  # Groq planner API client + FastAPI TestClient
+httpx>=0.28  # Groq planner API client + FastAPI TestClient (also the google-genai transport)
+google-genai>=2.25,<3  # Gemini planner provider (official SDK; not the legacy google-generativeai)
 pytest>=9.1

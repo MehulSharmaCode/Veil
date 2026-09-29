@@ -6,9 +6,9 @@
 > - Detailed verification logs and the current checklist are in `PROGRESS.md`.
 > - **Update it in the same task as any change that affects it** (see "Documentation governance" in `CLAUDE.md`).
 >
-> **Last reconciled:** 2026-09-29, after the release-candidate validation of the dashboard UI/UX redesign, the v0.1
-> hardening pass and M8 (which followed the Phase 1 freeze). Checked against a local test run and the live runs
-> recorded in `PROGRESS.md`.
+> **Last reconciled:** 2026-09-29, after Task 2 (Gemini planner provider added behind the provider seam; live
+> validation blocked by the Gemini free-tier quota), which followed the release-candidate commit of M8, the hardening
+> pass and the dashboard redesign. Checked against a local test run and the live runs recorded in `PROGRESS.md`.
 
 ## 1. Project identity
 
@@ -32,7 +32,7 @@ email and address, don't submit") without sending the user's sensitive values to
 | **B. Controlled demo site** | `demo-site/` (:8080) | Static "Edit profile" test fixture. Not part of Veil. |
 | **C. Read-only proof dashboard** ("proof console") | `dashboard/` (:8090) | Static ES-module app. Uses only `GET /telemetry/state` and SSE `GET /telemetry/stream`, and is never in the control path. `model.js` is a pure reducer: a stage or check is shown as passed/blocked/failed only if an event says so. `app.js` renders with `textContent` only. Layout (2026-09-29 redesign): task + outcome, a two-lane pipeline split by the device boundary (only the planner is remote) with a step × stage "whole task" matrix, the privacy boundary (on this device vs sent to the planner), "the AI proposes, VEIL decides", what the browser did, and collapsible evidence (payload, IR, timeline). |
 | **D. Backend** | `server/` (:8000) | FastAPI: `/health`, `POST /plan`, and a `/telemetry/*` in-memory relay on a separate router. |
-| **Planner** | `server/app/providers.py` | `PlannerProvider` protocol, with `GroqProvider` as the only runtime implementation. `ScriptedTestProvider` exists only in `server/tests/`. |
+| **Planner** | `server/app/providers.py` | `PlannerProvider` protocol with two runtime implementations, selected by `VEIL_PROVIDER`: `GroqProvider` (default) and `GeminiProvider`. `ScriptedTestProvider` exists only in `server/tests/`. |
 | **Tooling** | `scripts/` | `check_leaks.py` (canary leak check, 19 synthetic seeds) and `e2e_cdp.mjs` (Chrome E2E driver, headless or visible with the real side panel, IR audit, order evidence, screenshots; may know demo specifics). |
 
 **Inside the extension:**
@@ -91,16 +91,24 @@ Limits (`extension/src/shared/config.ts`):
 
 ## 4. Current provider and model
 
-| Setting | Value |
-|---|---|
-| Provider | **Groq**, `GroqProvider` (REST via `httpx`, no SDK) |
-| Endpoint | `POST https://api.groq.com/openai/v1/chat/completions` |
-| Model | **`openai/gpt-oss-20b`** (`VEIL_MODEL`) |
-| Reasoning effort | **`medium`** (`VEIL_EFFORT`: `low`, `medium` or `high`) |
-| Output | Strict JSON Schema (`veil_plan`), `max_completion_tokens` 4096 |
-| Budget | 20 s per HTTP attempt, 25 s per call, at most 3 attempts. With the one repair call the worst case is 50 s, under the extension's 60 s abort. |
-| Schema adaptation | Provider-local: same-`type` `anyOf` variants (the two `scroll` variants) are merged for Groq, and nulls are stripped from the output. The canonical schemas are unchanged. |
-| Key | `GROQ_API_KEY`, only in `server/.env` (gitignored). The user adds it. |
+`VEIL_PROVIDER` (`groq` | `gemini`, default **`groq`**) selects the provider; any other value stops the server at
+startup. Rollback is changing that one variable (and `VEIL_MODEL`, if it is set explicitly). Only the selected
+provider's key is used.
+
+| Setting | Groq (default) | Gemini (selectable; live validation blocked, see §10) |
+|---|---|---|
+| Class | `GroqProvider` (REST via `httpx`, no SDK) | `GeminiProvider` (official `google-genai` SDK, 2.25.0; `google-genai>=2.25,<3`) |
+| Endpoint | `POST https://api.groq.com/openai/v1/chat/completions` | `POST https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent` (stateless; the Interactions API, which stores requests server-side by default, is not used) |
+| Model (`VEIL_MODEL`; unset = default) | **`openai/gpt-oss-20b`** | **`gemini-3.8-flash`** (stable id, verified in the official model list 2026-09-29) |
+| Effort (`VEIL_EFFORT`: `low`, `medium`, `high`; default `medium`) | `reasoning_effort` | `thinking_level` |
+| Output | Strict JSON Schema (`veil_plan`), `max_completion_tokens` 4096 | `response_mime_type: application/json` + `response_json_schema`, `max_output_tokens` 4096, 1 candidate, thought parts dropped |
+| Schema adaptation | Provider-local: the two `scroll` variants are merged for Groq, and nulls are stripped from the output | **None**: the canonical `RESPONSE_SCHEMA` is sent unchanged; Gemini accepted it live (2026-09-29) |
+| Retries | Own loop only | Own loop only: the SDK's retries (`attempts=1`) and automatic function calling are off; no attempt is started with under 10 s left (Gemini rejects shorter server deadlines with HTTP 400) |
+| Key | `GROQ_API_KEY`, only in `server/.env` | `GEMINI_API_KEY`, only in `server/.env`; passed to the SDK explicitly (an ambient `GOOGLE_API_KEY` is ignored) |
+
+Both: 20 s per HTTP attempt, 25 s per call, at most 3 attempts. With the one repair call the worst case is 50 s,
+under the extension's 60 s abort. Both return raw JSON text to `planner.py`, which validates it with the canonical
+`PlanResponse` (one repair, else 502); errors are fixed messages with status codes only.
 
 Anthropic is **no longer used**. `AnthropicProvider` was removed, and `anthropic` is not in `server/requirements.txt`.
 
@@ -136,6 +144,11 @@ Anthropic is **no longer used**. `AnthropicProvider` was removed, and `anthropic
 - **Release-candidate validation passed** (2026-09-29): `make test`, `make leaks` 0/19, a live Groq smoke run to DONE
   and a Chrome check of the dashboard (`PROGRESS.md` → "Release-candidate validation 2026-09-29"). The M8, hardening
   and redesign work is committed as "Finalize Veil Phase 1 hardening and dashboard".
+- **Task 2, Gemini planner provider** (2026-09-29, uncommitted): `GeminiProvider` added behind the unchanged
+  `PlannerProvider` seam and selectable with `VEIL_PROVIDER=gemini`; Groq kept as the default and the rollback. Unit,
+  parity and seeded-leak tests pass. **Live validation is BLOCKED**: `gemini-3.8-flash` answered 503/504 (high
+  demand), then the free tier's 20 requests/day quota was exhausted; no planner step succeeded live, so Gemini has
+  not been made the default (`PROGRESS.md` → "Task 2: Gemini provider").
 - Nothing from ROADMAP §2–§5 has been started.
 
 ## 6. Completed milestones
@@ -225,6 +238,9 @@ Detection is heuristic.
 - Synthetic events have `isTrusted=false`. Sites that check it fail verification, and the step is handed to the user.
 - The Groq free tier allows 8K tokens/min, and a step costs about 2.5K. Tasks of 4 or more steps hit 429, and a
   wait longer than the budget fails the task.
+- Gemini (`gemini-3.8-flash`) on 2026-09-29: frequent HTTP 503 ("high demand") and 504; successful calls took about
+  16 s. The free tier allows **20 requests per day per model**, and every attempt counts, so a 3-step task uses at
+  least 3 of them. A per-day quota 429 fails at once ("daily request quota exhausted") instead of waiting.
 - `gpt-oss-20b` planner quality:
   - it phrases `ask_user` questions awkwardly;
   - it re-proposes a denied Save several times;
@@ -262,11 +278,16 @@ The full list is in `PROGRESS.md` → "Open items".
 6. The redesigned dashboard has not yet shown a live Save/Deny run (Groq free-tier limits during the redesign); that
    state was checked with the reducer's test fixtures (`PROGRESS.md` → "Dashboard redesign 2026-09-29"). A complete
    live DONE was shown on 2026-09-29 (`PROGRESS.md` → "Release-candidate validation 2026-09-29").
+7. **Gemini live validation is BLOCKED** (Task 2): no live planner step through `GeminiProvider` has succeeded yet
+   (503/504 under high demand, then the free-tier daily quota). The provider, its schema acceptance (one live
+   structured call) and its fail-closed behaviour are verified; the E2E matrix is not.
 
 ## 11. Current next task
 
 1. Discuss the next phase with the user. Nothing in ROADMAP §2–§5, OCR/vision included, starts automatically.
 2. Optional: a human repeats one task using the toolbar icon and the panel's close button.
+3. Task 2 follow-up: when the Gemini quota allows, run the live Gemini matrix (`PROGRESS.md` → "Task 2: Gemini
+   provider" → "To finish"); make Gemini the default only if it passes.
 
 ## 12. Explicitly deferred functionality
 
@@ -287,6 +308,10 @@ The full table with dates is in `PROGRESS.md` → "Decisions".
 - Groq `openai/gpt-oss-20b`, effort `medium`, strict JSON Schema over REST with `httpx`, adding no dependency. This
   replaced the never-run Anthropic provider on 2026-09-25.
 - The provider-local schema adaptation keeps the canonical schemas unchanged.
+- Gemini is a second provider behind the same seam (2026-09-29), selected by `VEIL_PROVIDER`, via the official
+  `google-genai` SDK and the stateless `generateContent` API (not the Interactions API, which stores requests by
+  default). It sends the canonical schema unchanged, keeps the same time budget with its own loop (SDK retries off),
+  and never starts an attempt with under 10 s left. Groq stays the default until Gemini passes live validation.
 - The provider time budget (20 s / 25 s / 3 attempts) fits the extension's 60 s `/plan` abort.
 - One sanitizer, one egress gate, one egress client. Outbound strings are the branded `SanitizedText`.
 - A telemetry gate failure drops the event; a planner gate failure blocks the task.
@@ -319,12 +344,12 @@ The full table with dates is in `PROGRESS.md` → "Decisions".
 
 ## 14. Current test baseline
 
-Re-run locally on 2026-09-29 for the release-candidate validation (`make test`; same counts as after the 2026-09-28 hardening pass and the dashboard redesign):
+Re-run locally on 2026-09-29 after Task 2 (Gemini provider):
 
 | Suite | Result |
 |---|---|
 | `tsc --noEmit` (extension) | clean |
 | vitest (extension: privacy, egress, policy, agent loop) | **116 / 116** passed (4 files) |
-| pytest (server, incl. `test_groq_provider.py` on MockTransport, no network) | **57 / 57** passed, 1 deprecation warning |
+| pytest (server: `test_server.py`, `test_groq_provider.py`, `test_gemini_provider.py`, `test_provider_parity.py`; MockTransport, no network) | **133 / 133** passed, 1 deprecation warning |
 | dashboard reducer (`node --test dashboard/test/model.test.mjs`) | **14 / 14** passed |
-| `make leaks` (`check_leaks.py --telemetry`, 19 seeds) | **0/19**, 2026-09-29 after the release-candidate live runs, over 128 planner payloads and the latest session's telemetry |
+| `make leaks` (`check_leaks.py --telemetry`, 19 seeds) | **0/19**, 2026-09-29 after the Task 2 live attempts, over 140 planner payloads (including those sent to Gemini) and the latest (Gemini) session's telemetry |
