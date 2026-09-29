@@ -1,9 +1,11 @@
 // PII detectors. Pure functions over *normalized* text. Recall-biased by design.
 //
 // Known limitations (documented, v0.1): no NER; names are only found via context cues
-// ("my name is", "signed in as", "Name:", greetings); addresses only via cues ("my address",
-// "address:", "residing at") or a 6-digit PIN next to address words (then grown to the surrounding
-// address tokens, so a cue-less address is masked whole); numbers are classified by
+// ("my name is", "signed in as", "Name:", greetings) or as the answer to a name question; addresses
+// via cues ("my address is", "address X", "X as my address"), house-number/street shapes
+// ("Flat 3B", "12 MG Road"), a 6-digit PIN next to address words, or as the answer to an address
+// question, each grown to the surrounding address tokens; an address with none of these (e.g.
+// "Shivajinagar Pune" in page text) is not detected; numbers are classified by
 // length/prefix/checksum, so an unusual phone format may be masked as [REDACTED_TEXT] instead
 // of [PHONE_n]; obfuscated emails ("name at domain dot com") are not detected.
 
@@ -116,32 +118,10 @@ export function detectNumbers(t: string): Span[] {
 
 const ABBREVIATIONS = new Set(['no', 'st', 'rd', 'dr', 'opp', 'nr', 'near', 'flat', 'bldg', 'apt', 'sec', 'ph', 'mr', 'mrs', 'ms', 'smt', 'shri']);
 
-/**
- * End of an address/name value: sentence end (". X" where the token before the dot is not an
- * abbreviation or a single letter), ";", "!", "?", newline, or a conjunction that starts a new clause.
- */
-export function valueEnd(t: string, from: number): number {
-  const clause = /\s+(?:and|but|then|also|plus|&)\s+(?:my|the|please|do|don't|dont|fill|also|then|set|enter|type|click|put|leave|i)\b/gi;
-  clause.lastIndex = from;
-  const c = clause.exec(t);
-  let end = c ? c.index : t.length;
-  for (let i = from; i < end; i++) {
-    const ch = t[i]!;
-    if (ch === ';' || ch === '!' || ch === '?' || ch === '\n') return i;
-    if (ch === '.' && (i + 1 >= t.length || /\s/.test(t[i + 1]!))) {
-      const before = /([A-Za-z0-9]+)$/.exec(t.slice(from, i));
-      const tok = before?.[1] ?? '';
-      const isAbbrev = (/^[A-Za-z]$/.test(tok) || ABBREVIATIONS.has(tok.toLowerCase())) && i + 1 < t.length;
-      const nextIsDigit = /^\s*\d/.test(t.slice(i + 1));
-      if (!isAbbrev && !nextIsDigit) return i;
-    }
-  }
-  return end;
-}
-
 function trimSpan(t: string, start: number, end: number): [number, number] {
-  while (start < end && /[\s:,(\-"']/.test(t[start]!)) start++;
-  while (end > start && /[\s,:)\-"']/.test(t[end - 1]!)) end--;
+  // Dashes and quotes that frame a value ("address — X —", "“X”") are punctuation, not part of it.
+  while (start < end && /[\s:,(\-"'–—‒―“”‘’]/.test(t[start]!)) start++;
+  while (end > start && /[\s,:)\-"'–—‒―“”‘’]/.test(t[end - 1]!)) end--;
   return [start, end];
 }
 
@@ -149,15 +129,203 @@ function startsWithPlaceholder(t: string, at: number): boolean {
   return /^\s*:?\s*\[[A-Z_0-9]+\]/.test(t.slice(at));
 }
 
-const ADDRESS_CUE_RE = /\b(?:my\s+(?:home\s+|postal\s+|current\s+|permanent\s+)?address(?:\s+is)?|address\s*(?:is|:)|residing\s+at|(?:i\s+)?live\s+at|lives\s+at)\s*:?\s*/gi;
+// ---- addresses --------------------------------------------------------------------------------
+//
+// One boundary engine for every address detector. An address span is grown token by token from an
+// anchor (a cue such as "my address is", a "… as my address" suffix, a house-number/street shape or
+// a PIN code) and ends at the first token that cannot be part of an address: a sentence/clause end,
+// an instruction or label word, another PII value, or a connector ("and", "in", "to", …) that starts
+// a new clause. Fail closed: between those boundaries every token is treated as part of the address.
 
-export function detectAddressCues(t: string): Span[] {
+/** Words that are never part of an address: instructions, pronouns/copulas, field labels, status words. */
+const ADDRESS_STOP = new Set([
+  'then', 'but', 'also', 'plus', 'please', 'pls', 'kindly', 'do', 'dont', "don't", 'not', 'never', 'fill', 'enter', 'type',
+  'put', 'set', 'use', 'write', 'add', 'insert', 'paste', 'copy', 'update', 'change', 'save', 'submit', 'click', 'press',
+  'tap', 'stop', 'leave', 'skip', 'select', 'choose', 'send', 'want', 'need', 'would', 'should', 'will', 'must', 'can',
+  'my', 'your', 'our', 'his', 'her', 'their', 'me', 'us', 'we', 'you', 'they', 'it', 'this', 'that', 'these', 'those',
+  'is', 'are', 'was', 'be', 'as', 'into', 'here', 'there',
+  'address', 'addresses', 'email', 'e-mail', 'mail', 'phone', 'mobile', 'tel', 'telephone', 'contact', 'name', 'pan',
+  'aadhaar', 'dob', 'id', 'field', 'fields', 'box', 'input', 'form', 'section', 'column', 'line',
+  'required', 'optional', 'invalid', 'missing', 'mandatory', 'below', 'above', 'same', 'needed', 'empty', 'incorrect',
+  'updated', 'saved', 'changed', 'verified', 'details', 'unknown',
+]);
+/** Connectors end an address only when a new clause follows them ("and my email", "in the address field"). */
+const ADDRESS_CONNECTORS = new Set(['and', '&', 'or', 'in', 'to', 'for', 'with', 'from', 'at', 'on']);
+const DETERMINERS = new Set(['the', 'a', 'an']);
+/** Words that are evidence of an address when a cue alone is weak ("address …" without "my"/":"). */
+const ADDRESS_WORDS =
+  /\b(?:road|rd|street|st|lane|marg|avenue|ave|nagar|colony|layout|cross|main|sector|block|phase|flat|house|plot|door|floor|apartments?|apt|society|residency|towers?|enclave|vihar|chowk|gali|mohalla|near|opp|behind|village|taluka|tehsil|district|dist|city|state|pin|pincode|highway|circle|park|bagh|puram|pet|peth|wadi|halli)\b/i;
+
+interface Tok {
+  start: number;
+  end: number;
+  raw: string;
+}
+
+/** Token without surrounding quotes/brackets/trailing punctuation, lowercased. */
+function word(raw: string): string {
+  return raw.replace(/^[("'[]+/, '').replace(/[,)"'\].:;!?]+$/, '').toLowerCase();
+}
+
+/** A token that cannot be part of an address. */
+function addressStops(raw: string): boolean {
+  const core = raw.replace(/^[("'[]+/, '').replace(/[,)"'\]]+$/, '');
+  if (!core) return false; // punctuation-only token (e.g. "-") stays inside the address
+  if (/^[;!?:]/.test(core) || core.includes('@') || /^\[[A-Z_0-9]+\]$/.test(core) || /^\(?[A-Z]+_\d+\)?$/.test(core)) return true;
+  if (digitsOnly(core).length >= 7) return true; // phone / id-like numbers are detected separately
+  return ADDRESS_STOP.has(core.replace(/[.:;!?]+$/, '').toLowerCase());
+}
+
+/** True if the token ends a sentence/clause: ";", "!", "?", ":" or "." after a non-abbreviation. */
+function endsClause(tok: string): boolean {
+  const core = tok.replace(/[,)"'\]]+$/, '');
+  if (/[;!?:]$/.test(core)) return true;
+  if (!core.endsWith('.')) return false;
+  const w = /([A-Za-z0-9]+)\.$/.exec(core)?.[1] ?? '';
+  return !(/^[A-Za-z]$/.test(w) || ABBREVIATIONS.has(w.toLowerCase()));
+}
+
+/**
+ * A connector at `i` that starts a new clause rather than continuing the address: followed by a
+ * determiner or a stop word (within two words), or by words with no address evidence up to the next
+ * boundary ("… 700016 for help", "… and alternate email").
+ */
+function clauseConnector(toks: Tok[], i: number): boolean {
+  if (!ADDRESS_CONNECTORS.has(word(toks[i]!.raw))) return false;
+  const a = toks[i + 1];
+  const b = toks[i + 2];
+  if (!a || DETERMINERS.has(word(a.raw)) || addressStops(a.raw) || (b && !endsClause(a.raw) && addressStops(b.raw))) return true;
+  const run: string[] = [];
+  for (let j = i + 1; j < toks.length && !addressStops(toks[j]!.raw) && !ADDRESS_CONNECTORS.has(word(toks[j]!.raw)); j++) {
+    run.push(toks[j]!.raw);
+    if (endsClause(toks[j]!.raw)) break;
+  }
+  return !addressEvidence(run.join(' '), true);
+}
+
+/** Tokens of `t` from offset `pos` (a token cut at `pos` yields its remainder only). */
+function tokensFrom(t: string, pos: number): Tok[] {
+  return [...t.slice(pos).matchAll(/\S+/g)].map((m) => ({ start: pos + m.index!, end: pos + m.index! + m[0].length, raw: m[0] }));
+}
+
+/** The whitespace-delimited token of `t` that contains offset `pos` strictly inside it, if any. */
+function tokenAround(t: string, pos: number): Tok | null {
+  if (pos <= 0 || pos >= t.length || /\s/.test(t[pos]!) || /\s/.test(t[pos - 1]!)) return null;
+  let s = pos;
+  while (s > 0 && !/\s/.test(t[s - 1]!)) s--;
+  let e = pos;
+  while (e < t.length && !/\s/.test(t[e]!)) e++;
+  return { start: s, end: e, raw: t.slice(s, e) };
+}
+
+/** End offset of an address that continues after offset `pos` (an anchor or cue end). */
+function growForward(t: string, pos: number): number {
+  let end = pos;
+  let from = pos;
+  // An anchor that ends inside a token ("411005." / "Rd.,"): its remainder is a terminator or kept.
+  const cut = tokenAround(t, pos);
+  if (cut) {
+    const rest = t.slice(pos, cut.end);
+    if (/^[;!?:]/.test(rest) || (rest.startsWith('.') && endsClause(cut.raw))) return pos;
+    end = from = cut.end;
+  }
+  const toks = tokensFrom(t, from);
+  for (let i = 0; i < toks.length; i++) {
+    const tok = toks[i]!;
+    if (/^[.;!?:]/.test(tok.raw) || addressStops(tok.raw) || clauseConnector(toks, i)) break;
+    if (endsClause(tok.raw)) return tok.start + tok.raw.replace(/[,)"'\]]+$/, '').length - 1; // drop the terminator
+    end = tok.end;
+  }
+  return end;
+}
+
+/** Start offset of an address that continues before offset `pos` (an anchor or suffix-cue start). */
+function growBackward(t: string, pos: number): number {
+  let start = pos;
+  const toks = [...t.slice(0, pos).matchAll(/\S+/g)].map((m) => ({ start: m.index!, end: m.index! + m[0].length, raw: m[0] }));
+  for (let i = toks.length - 1; i >= 0; i--) {
+    const tok = toks[i]!;
+    if (endsClause(tok.raw) || addressStops(tok.raw) || ADDRESS_CONNECTORS.has(word(tok.raw))) break;
+    start = tok.start;
+  }
+  return start;
+}
+
+/**
+ * Whether a candidate value carries address evidence: a digit, an address word or a comma. With
+ * `lenient` (text the user typed), a run of capitalized words ("Andheri West, Mumbai") also counts.
+ */
+function addressEvidence(value: string, lenient: boolean): boolean {
+  if (/\d/.test(value) || /,/.test(value) || ADDRESS_WORDS.test(value)) return true;
+  if (!lenient) return false;
+  const ws = value.split(/\s+/).filter(Boolean);
+  return ws.length > 0 && ws.every((w) => /^[("']?[A-Z0-9]/.test(w));
+}
+
+export interface DetectOptions {
+  /**
+   * The text was typed by the user (task text, ask_user answers). Weak address cues ("fill address X")
+   * then need no further evidence: in a user's instruction the words after "address" are the value.
+   */
+  userText?: boolean;
+}
+
+const ADDRESS_QUALIFIERS = '(?:(?:home|postal|current|permanent|residential|mailing|shipping|billing|delivery|office|new|full|correct)\\s+)?';
+const NOT_ADDRESS_PREFIX = '(?<!\\b(?:e-?mail|ip|web|website|mac|url|server|wallet|reply)[\\s-])';
+/**
+ * Forward cues: "my address is X", "address: X", "address X", "the address field with X", "set the
+ * address to X", "residing at X". Group 1 = "my …" (strong), group 2 = the connector tail.
+ */
+const ADDRESS_CUE_RE = new RegExp(
+  `\\b(?:(my\\s+${ADDRESS_QUALIFIERS})|${ADDRESS_QUALIFIERS})${NOT_ADDRESS_PREFIX}address(?:es)?\\b` +
+    `(?:\\s+(?:field|box|input|column|line(?:\\s*\\d)?))?` +
+    `((?:\\s*(?:[:=–—-]+|(?:is|as|with|to|be|will|should|would|shall|here|below)\\b))*)\\s*` +
+    `|\\b(?:residing|resides|reside|living|lives|live|located|situated|staying|stays)\\s+at\\b\\s*:?\\s*`,
+  'gi',
+);
+/** Backward cues: "Use X as my address", "Enter X in the address field". The value precedes the cue. */
+const ADDRESS_SUFFIX_RE = new RegExp(
+  `\\b(?:as|in|into|to|for|under)\\s+(?:(?:the|my|your|this)\\s+)?${ADDRESS_QUALIFIERS}address(?:es)?\\b(?:\\s+(?:field|box|input|column|line(?:\\s*\\d)?))?`,
+  'gi',
+);
+
+export function detectAddressCues(t: string, opts: DetectOptions = {}): Span[] {
   const out: Span[] = [];
   for (const m of t.matchAll(ADDRESS_CUE_RE)) {
     const from = m.index! + m[0].length;
     if (startsWithPlaceholder(t, from)) continue;
-    const [s, e] = trimSpan(t, from, valueEnd(t, from));
-    if (e - s >= 3) out.push({ start: s, end: e, category: 'ADDRESS', detector: 'cue:address' });
+    const strong = m[1] !== undefined || m[2] === undefined || /[:=]|\bis\b/i.test(m[2]);
+    const [s, e] = trimSpan(t, from, growForward(t, from));
+    if (e - s < 3) continue;
+    if (!strong && !opts.userText && !addressEvidence(t.slice(s, e), false)) continue;
+    out.push({ start: s, end: e, category: 'ADDRESS', detector: 'cue:address' });
+  }
+  for (const m of t.matchAll(ADDRESS_SUFFIX_RE)) {
+    const [s, e] = trimSpan(t, growBackward(t, m.index!), m.index!);
+    if (e - s < 3 || !addressEvidence(t.slice(s, e), !!opts.userText)) continue;
+    out.push({ start: s, end: e, category: 'ADDRESS', detector: 'cue:address-suffix' });
+  }
+  return out;
+}
+
+/** Grow an anchor [start, end) to the surrounding address tokens. */
+function addressExtent(t: string, start: number, end: number): [number, number] {
+  return trimSpan(t, growBackward(t, start), growForward(t, end));
+}
+
+// Cue-less address shapes: a house/flat number ("Flat 3B", "House No. 5") or a number followed within a
+// few words by a street word ("12 MG Road", "221B Baker Street").
+const HOUSE_RE = /\b(?:flat|house|plot|door|bungalow|villa|apt|apartment|shop|h\.?\s?no|d\.?\s?no)\.?\s*(?:no\.?|number|#)?\s*[-#:]?\s*\d{1,5}[A-Za-z]?(?:[/-]\d{1,5}[A-Za-z]?)?(?![\d%])/gi;
+const STREET_RE =
+  /(?<![\w.])\d{1,5}[A-Za-z]?(?:[/-]\d{1,5}[A-Za-z]?)?,?\s+(?:[A-Za-z][\w.'-]*\s+){0,3}(?:road|rd|street|lane|marg|avenue|nagar|colony|layout|cross|enclave|vihar|society|apartments|residency|chowk|gali|mohalla|highway|boulevard)\b\.?/gi;
+
+export function detectAddressShapes(t: string): Span[] {
+  const out: Span[] = [];
+  for (const re of [HOUSE_RE, STREET_RE]) {
+    for (const m of t.matchAll(re)) {
+      const [start, end] = addressExtent(t, m.index!, m.index! + m[0].replace(/\.$/, '').length);
+      if (end > start) out.push({ start, end, category: 'ADDRESS', detector: 'shape:address' });
+    }
   }
   return out;
 }
@@ -176,59 +344,35 @@ export function detectPinCodes(t: string): Span[] {
 }
 
 /**
- * Words that end an address when growing it outward from a PIN code: instruction/function words and
- * field labels. Everything else between boundaries is treated as part of the address (fail closed:
- * a cue-less address such as an ask_user answer "12 X Road, Y, City 411005" is masked whole, not
- * just its PIN).
+ * The category an ask_user answer is expected to hold, from the (sanitized) question: "What is your
+ * address?" → ADDRESS, "What is your full name?" → PERSON. Yes/no questions expect nothing.
  */
-const ADDRESS_STOP = new Set([
-  'and', 'but', 'then', 'also', 'plus', 'or', 'my', 'the', 'please', 'do', 'dont', "don't", 'not', 'fill', 'enter',
-  'type', 'put', 'set', 'use', 'with', 'to', 'into', 'for', 'is', 'are', 'it', 'this', 'that', 'of', 'me', 'your',
-  'our', 'here', 'as', 'at', 'from', 'submit', 'save', 'click', 'address', 'email', 'e-mail', 'phone', 'mobile',
-  'tel', 'fax', 'name', 'pan', 'aadhaar', 'dob', 'id',
-]);
-
-/** A token that cannot be part of an address, or ends it (label colon, sentence end, other PII). */
-function addressStops(tok: string): boolean {
-  const core = tok.replace(/^[("'[]+/, '').replace(/[,)"'\]]+$/, '');
-  if (!core) return false; // punctuation-only token (e.g. "-") stays inside the address
-  if (/^[;!?:]/.test(core) || core.includes('@') || /^\[[A-Z_0-9]+\]$/.test(core)) return true;
-  if (digitsOnly(core).length >= 7) return true; // phone / id-like numbers are detected separately
-  return ADDRESS_STOP.has(core.replace(/[.:;!?]+$/, '').toLowerCase());
+export function expectedAnswerCategory(question: string): 'ADDRESS' | 'PERSON' | null {
+  const q = question.trim().toLowerCase();
+  if (/^(?:do|does|did|should|shall|can|could|may|would|will|is|are|was|were|have|has|want)\b/.test(q)) return null;
+  if (new RegExp(`${NOT_ADDRESS_PREFIX}\\baddress(?:es)?\\b`).test(q)) return 'ADDRESS';
+  if (/\b(?:full\s+|first\s+|last\s+|your\s+)?name\b/.test(q) && !/\b(?:user|file|company|field|display)\s*name\b/.test(q)) return 'PERSON';
+  return null;
 }
 
-/** True if the token ends a sentence/clause: ";", "!", "?", ":" or "." after a non-abbreviation. */
-function endsClause(tok: string): boolean {
-  const core = tok.replace(/[,)"'\]]+$/, '');
-  if (/[;!?:]$/.test(core)) return true;
-  if (!core.endsWith('.')) return false;
-  const word = /([A-Za-z0-9]+)\.$/.exec(core)?.[1] ?? '';
-  return !(/^[A-Za-z]$/.test(word) || ABBREVIATIONS.has(word.toLowerCase()));
-}
+const CONTROL_ANSWER = /^(?:yes|no|y|n|ok|okay|sure|skip|stop|cancel|continue|proceed|done|none|nothing|same|n\/a|na)\b/i;
 
-/** Grow an address span from its PIN code to the surrounding address tokens on the same line/clause. */
-function addressExtent(t: string, pinStart: number, pinEnd: number): [number, number] {
-  let start = pinStart;
-  const before = [...t.slice(0, pinStart).matchAll(/\S+/g)];
-  for (let i = before.length - 1; i >= 0; i--) {
-    const m = before[i]!;
-    const tokEnd = m.index! + m[0].length;
-    if (t.slice(tokEnd, start).includes('\n') || endsClause(m[0]) || addressStops(m[0])) break;
-    start = m.index!;
+/**
+ * A whole answer that no detector flagged, when the question asked for an address or a name: mask it
+ * as that category if it has the shape (fail closed for cue-less, PIN-less answers such as
+ * "Shivajinagar, Pune" or "priya nair").
+ */
+export function detectExpectedAnswer(t: string, expect: 'ADDRESS' | 'PERSON'): Span[] {
+  const [s, e] = trimSpan(t, 0, t.replace(/[.!?]+$/, '').length);
+  const v = t.slice(s, e);
+  if (e - s < 3 || CONTROL_ANSWER.test(v) || /[@[\]]/.test(v)) return [];
+  const ws = v.split(/\s+/);
+  const plainWords = ws.length >= 2 && ws.every((w) => /^[A-Za-z][A-Za-z.'-]*,?$/.test(w) && !addressStops(w));
+  if (expect === 'ADDRESS' && (addressEvidence(v, true) || plainWords)) return [{ start: s, end: e, category: 'ADDRESS', detector: 'expected:address' }];
+  if (expect === 'PERSON' && /^[A-Za-z][A-Za-z.'-]*(?:\s+[A-Za-z][A-Za-z.'-]*){0,3}$/.test(v)) {
+    return [{ start: s, end: e, category: 'PERSON', detector: 'expected:name' }];
   }
-  let end = pinEnd;
-  const re = /\S+/g;
-  re.lastIndex = pinEnd;
-  for (let m = re.exec(t); m; m = re.exec(t)) {
-    const tok = m[0];
-    if (t.slice(end, m.index).includes('\n') || /^[.;!?:]/.test(tok) || addressStops(tok)) break;
-    if (endsClause(tok)) {
-      end = m.index + tok.replace(/[,)"'\]]+$/, '').length - 1; // drop the terminating punctuation
-      break;
-    }
-    end = m.index + tok.length;
-  }
-  return trimSpan(t, start, end);
+  return [];
 }
 
 const NAME_TOKEN = /^[A-Za-z][A-Za-z'.-]*$/;
@@ -300,12 +444,13 @@ export function detectDobCues(t: string): Span[] {
 }
 
 /** All detectors, unmerged. */
-export function detectAll(t: string): Span[] {
+export function detectAll(t: string, opts: DetectOptions = {}): Span[] {
   const spans = [
     ...detectEmails(t),
     ...detectPan(t),
     ...detectNumbers(t),
-    ...detectAddressCues(t),
+    ...detectAddressCues(t, opts),
+    ...detectAddressShapes(t),
     ...detectPinCodes(t),
     ...detectNameCues(t),
     ...detectPhoneCues(t),
@@ -352,6 +497,6 @@ export function mergeSpans(spans: Span[]): Span[] {
   });
 }
 
-export function detect(t: string): Span[] {
-  return mergeSpans(detectAll(t));
+export function detect(t: string, opts: DetectOptions = {}): Span[] {
+  return mergeSpans(detectAll(t, opts));
 }

@@ -43,6 +43,7 @@ def create_app(settings: Settings | None = None, provider: PlannerProvider | Non
             "planner_configured": provider is not None,
             "provider": provider.name if provider else None,
             "model": provider.model if provider else None,
+            "effort": getattr(provider, "effort", None) if provider else None,
         }
 
     @app.post("/plan", response_model=PlanResponse)

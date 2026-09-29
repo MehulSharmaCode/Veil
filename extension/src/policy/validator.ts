@@ -32,7 +32,8 @@ export interface Concern {
 export type Verdict =
   | { kind: 'reject'; rule: PolicyRule; reason: string }
   | { kind: 'handoff'; rule: 'T1_CREDENTIAL'; reason: string }
-  | { kind: 'allow'; confirm: Concern[]; placeholder?: string };
+  /** `checked`: the rules this call actually evaluated (for telemetry; the V2/V3 live checks run separately). */
+  | { kind: 'allow'; confirm: Concern[]; checked: PolicyRule[]; placeholder?: string };
 
 export interface PolicyContext {
   /** Elements of the most recent snapshot, by id. */
@@ -54,6 +55,8 @@ const COMPATIBLE: Record<PiiCategory, ValueCategory[]> = {
 };
 
 const reject = (rule: PolicyRule, reason: string): Verdict => ({ kind: 'reject', rule, reason });
+const allow = (checked: PolicyRule[], confirm: Concern[] = [], placeholder?: string): Verdict =>
+  placeholder === undefined ? { kind: 'allow', confirm, checked } : { kind: 'allow', confirm, checked, placeholder };
 
 function isEditable(el: RawElement): boolean {
   return !!el.state.editable && !el.state.disabled && !el.state.readonly;
@@ -61,26 +64,26 @@ function isEditable(el: RawElement): boolean {
 
 /** Checks that need only the action, the latest snapshot and the vault. */
 export function validateAction(action: Action, ctx: PolicyContext): Verdict {
-  if (action.type === 'wait' || action.type === 'ask_user' || action.type === 'done') return { kind: 'allow', confirm: [] };
-  if (action.type === 'scroll' && !('target' in action)) return { kind: 'allow', confirm: [] };
+  if (action.type === 'wait' || action.type === 'ask_user' || action.type === 'done') return allow(['V1_ACTION']);
+  if (action.type === 'scroll' && !('target' in action)) return allow(['V1_ACTION']);
 
   const el = ctx.snapshot.get(action.target);
   if (!el) return reject('V2_TARGET', `target ${action.target} is not in the latest snapshot`);
   if (!el.visible) return reject('V2_TARGET', `target ${action.target} is not visible`);
-  if (action.type === 'scroll') return { kind: 'allow', confirm: [] };
+  if (action.type === 'scroll') return allow(['V1_ACTION', 'V2_TARGET']);
   if (el.state.disabled) return reject('V4_SUITABILITY', `target ${action.target} is disabled`);
 
   if (action.type === 'click') {
     if (el.kind !== 'interactive') return reject('V4_SUITABILITY', `target ${action.target} is not interactive`);
     const confirm: Concern[] = [];
     if (isSubmitLike(el)) confirm.push({ rule: 'R1_SUBMIT_LIKE', reason: 'This click may submit or change data.' });
-    return { kind: 'allow', confirm };
+    return allow(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'R1_SUBMIT_LIKE'], confirm);
   }
 
   if (action.type === 'select') {
     const isSelect = el.tag === 'select' || el.role === 'listbox' || el.role === 'combobox';
     if (!isSelect || el.state.disabled) return reject('V4_SUITABILITY', `target ${action.target} is not a select`);
-    return { kind: 'allow', confirm: [] };
+    return allow(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY']);
   }
 
   // type
@@ -105,7 +108,7 @@ export function validateAction(action: Action, ctx: PolicyContext): Verdict {
     if (allowedOrigin !== ctx.pageOrigin) {
       confirm.push({ rule: 'T3_ORIGIN', reason: `${text} came from a different origin` });
     }
-    return { kind: 'allow', confirm, placeholder: text };
+    return allow(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'T1_CREDENTIAL', 'T2_CATEGORY', 'T3_ORIGIN'], confirm, text);
   }
 
   // Literal text: must not embed placeholders, vault values or anything PII-shaped.
@@ -116,7 +119,7 @@ export function validateAction(action: Action, ctx: PolicyContext): Verdict {
     return reject('T4_SMUGGLING', 'literal text contains a vault value');
   }
   if (scanStrict(text).length) return reject('T4_SMUGGLING', 'literal text looks like personal data');
-  return { kind: 'allow', confirm: [] };
+  return allow(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'T1_CREDENTIAL', 'T4_SMUGGLING']);
 }
 
 /** Live state of the target as re-read by the content script just before execution. */

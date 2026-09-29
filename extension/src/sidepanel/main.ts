@@ -8,7 +8,7 @@ import { Vault } from '../privacy/vault';
 import { Sanitizer } from '../privacy/sanitizer';
 import { sanitizeSnapshot, type SanitizedSnapshot } from '../egress/payload';
 import { EgressClient } from '../egress/client';
-import { Agent, type AgentUI, type Outcome } from './agent';
+import { Agent, type AgentUI, type Outcome, type PlannerInfo } from './agent';
 
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
@@ -34,6 +34,8 @@ const els = {
 };
 
 let agent: Agent | null = null;
+/** Last planner identity reported by /health (metadata only; forwarded to telemetry for the dashboard). */
+let planner: PlannerInfo | null = null;
 let cancelPrompt: (() => void) | null = null;
 
 function log(line: string, kind: 'info' | 'ok' | 'warn' | 'error' = 'info') {
@@ -130,7 +132,7 @@ els.start.onclick = async () => {
   els.stage.className = 'pill';
   els.start.disabled = true;
   els.stop.disabled = false;
-  agent = new Agent(ui);
+  agent = new Agent(ui, { planner });
   // The raw task stays in this textarea (local UI) only; the agent sanitizes it before anything else.
   await agent.run(task);
 };
@@ -155,10 +157,12 @@ async function checkHealth() {
   const probe = new EgressClient({ secrets: () => ({ text: [], digits: [] }), failClosed: () => new Sanitizer(new Vault()).failClosed() });
   try {
     const r = await probe.get(`${CONFIG.PLANNER_URL}/health`);
-    const body = (await r.json()) as { status?: string; planner_configured?: boolean; model?: string };
+    const body = (await r.json()) as { status?: string; planner_configured?: boolean; provider?: string; model?: string; effort?: string };
+    planner = body.planner_configured && body.provider && body.model ? { provider: body.provider, model: body.model, effort: body.effort ?? null } : null;
     els.health.textContent = body.planner_configured ? `backend: ok · ${body.model ?? ''}` : 'backend: ok · no LLM key';
     els.health.className = `pill ${body.planner_configured ? 'pill-ok' : 'pill-muted'}`;
   } catch {
+    planner = null;
     els.health.textContent = 'backend: offline';
     els.health.className = 'pill pill-err';
   }

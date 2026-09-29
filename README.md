@@ -24,6 +24,11 @@ Built for SIH 2026, problem statement **SIH26171: On-device Visual Perception fo
 > One privacy bug was found and fixed on 2026-09-25: a partially masked address was sent to the planner (see
 > [Privacy incident log](#privacy-incident-log)).
 >
+> A final **hardening pass (2026-09-28)** fixed address under- and over-masking in task text, custom ARIA widget
+> values entering the IR, several Stop/failure truthfulness gaps and the dashboard's current-step vs task-wide
+> ambiguity. It re-ran the live matrix with the real planner; the leak check found 0 of 19 synthetic values. Details:
+> `docs/PROGRESS.md` → "Hardening pass 2026-09-28".
+>
 > The runs were driven through CDP rather than by hand; see [Current limitations](#current-limitations). No external
 > websites are supported.
 
@@ -42,7 +47,7 @@ LLM, has the final say on every action.
 - An egress gate that every outbound message must pass, and a single egress client.
 - A FastAPI planner endpoint with strict request/response schemas.
 - Local action validation, confirmation for submit-like actions, execution in the page and verification.
-- A read-only dashboard that shows the real events of a run.
+- A read-only dashboard that makes the real pipeline visible, event by event, including blocked and stopped cases.
 - A canary leak check over what the backend received.
 
 **Why DOM-only first:** the final direction is a local *visual* pipeline (on-device OCR and face detection) that
@@ -123,15 +128,43 @@ never special-case it (no demo-specific ids, selectors, names or values in `exte
 
 ### Visualization Dashboard
 
-`dashboard/` is a static, read-only observability app served on `:8090`. It shows the real telemetry events of a run:
-- stage tracker;
-- task (with placeholders);
-- IR summary;
-- detected categories and the placeholder table;
-- vault status (counts and categories);
-- the sanitized outbound payload and the egress gate result;
-- the planner's action, validation, execution and verification results;
-- a live timeline.
+`dashboard/` is a static, read-only "proof console" served on `:8090`. It makes the real pipeline visible from the
+real telemetry stream, as it happens, and reads top to bottom in the order of the story: what was asked, what VEIL
+saw and kept local, what crossed to the remote planner, what the planner proposed, what local code decided, what
+the browser actually did and whether it was verified.
+- **Task and outcome:** the task exactly as it left the browser (placeholders set as tokens), the overall state
+  (RUNNING, DONE, STOPPED, PANEL CLOSED, BLOCKED, FAILED, STEP LIMIT) with a one-line meaning and the outcome message,
+  then step, current stage, elapsed time, planner provider/model/effort and session.
+- **Pipeline (current step):** the stages grouped into phases (asked → seen locally → kept local → boundary →
+  proposed remotely → decided locally → acted in the page → checked → outcome) on two lanes split by the device
+  boundary. Only the planner sits in the hatched **remote** lane; everything else runs in this browser. The stage
+  that is happening now is outlined. A stage the current step's action does not have (DONE and ASK_USER have nothing
+  to resolve, execute or verify) is "N/A this step", and such stages say what happened there earlier in the task.
+- **Whole task so far:** counts (steps, browser actions, verified/denied/rejected, answers, in flight) and the most
+  recent browser action, then the **agent loop** as a step × stage matrix: one row per step with the planner's
+  proposal, a status mark per stage and the step result. The current step's row is marked.
+- **What stayed local, and what left the browser:** two sides of the egress gate. *On this device* (sanitization):
+  local inputs → detected categories → placeholders → vault, and a placeholder table whose "real value" column is a
+  fixed-size redaction bar (never the value). *Sent to the planner* (privacy proof): egress results, requests and
+  bytes, the dashboard's own network privacy re-check of each payload (forbidden keys, HTML), the placeholders that
+  stood in for values, the vault lifecycle and the leak check (not observed), plus what is enforced by design.
+- **The AI proposes. VEIL decides.** A chain: the remote planner's untrusted proposal → the local checks, taint
+  decision, risk policy and verdict → the user's decision (confirmation or answer, if any) → the result.
+- **What the browser actually did:** the most recent browser action (labelled with its step): action and target,
+  local placeholder resolution, execution, settle and verification. An action that was dispatched when the task was
+  stopped or closed is shown as "may have run; result not observed", or as "ran after Stop" if its result arrived.
+- **Inspect the evidence** (collapsible): the outbound payload (the exact sanitized JSON of each planner request,
+  with a summary), DOM → IR (the interactive elements VEIL saw: ids, roles, sanitized names, field category,
+  `has_value`, flags) and the event timeline (every event in the order it happened, side-panel clock in
+  milliseconds, grouped by step, with expandable details). Telemetry is delivered after the fact; the header shows
+  the current delivery delay, and a late event is slotted in by its timestamp.
+
+It has dark and light themes (following the system setting) and is laid out for 1440, 1024 and 390 px widths.
+
+Nothing is shown as passed unless an event says so. Stages the stream does not prove stay "pending", "skipped" (the
+step ended before them), "N/A this step" or "not observed". DONE is labelled as the planner's declaration, accepted
+locally. A stage cut short by Stop or panel close is shown as "interrupted". The leak check is an offline tool
+(`make leaks`) and is labelled as not observed in the stream.
 
 It only issues `GET /telemetry/state` and subscribes to `GET /telemetry/stream` (SSE). **It never sends anything to
 the extension or the backend and is not part of the agent's control path.** Events reach it only after passing the
@@ -140,8 +173,8 @@ same egress gate as planner requests, so it shows placeholders, categories and c
 ### Backend
 
 `server/` is a FastAPI app on `:8000`:
-- **`GET /health`:** status, plus whether a planner provider is configured (and its name and model). The side panel
-  reads this.
+- **`GET /health`:** status, plus whether a planner provider is configured (and its name, model and reasoning
+  effort). The side panel reads this and passes the planner identity into the task's telemetry for the dashboard.
 - **`POST /plan`:** validates the incoming payload against a closed pydantic schema (`extra="forbid"`), builds the
   prompt (page data is wrapped as `<untrusted_page_data>`) and asks the configured LLM provider for structured JSON.
   It validates the response, makes one repair attempt if it is invalid, and otherwise returns 502. With no provider
@@ -173,8 +206,9 @@ tests and a canary leak check, not a formal guarantee. Detection is heuristic (s
 less or asks the user.
 
 - **Raw sensitive values stay local.** Values detected in the task text and page text (email, phone, PAN, Aadhaar
-  with Verhoeff check, card numbers with Luhn check, address/name/DOB cues) are replaced before anything leaves the
-  extension. Unclassifiable long digit strings become `[REDACTED_TEXT]`.
+  with Verhoeff check, card numbers with Luhn check, address/name/DOB cues, house-number/street address shapes) are
+  replaced before anything leaves the extension. An `ask_user` answer to an address or name question is masked whole
+  when no detector flags it. Unclassifiable long digit strings become `[REDACTED_TEXT]`.
 - **Placeholders stand in for values.** Outbound text contains typed placeholders (`[EMAIL_1]`, `[ADDRESS_1]`, …),
   reused consistently for the same value. Placeholder look-alikes that appear in page or task text are defused, so a
   page cannot forge a vault reference.
@@ -256,7 +290,11 @@ Veil/
 │   ├── requirements.txt
 │   └── .env.example           # template for server/.env (no key)
 ├── demo-site/                 # B. Controlled test fixture (static, :8080)
-├── dashboard/                 # C. Read-only observability app (static, :8090)
+├── dashboard/                 # C. Read-only proof dashboard (static, :8090)
+│   ├── registry.js            #   stages, labels, summaries (data)
+│   ├── model.js               #   pure reducer: events → state (statuses come only from events)
+│   ├── app.js                 #   rendering + read-only transport (GET state, SSE stream)
+│   └── test/                  #   node:test suite for the reducer
 ├── scripts/
 │   ├── check_leaks.py         # canary leak check over logged payloads (+ live telemetry)
 │   └── e2e_cdp.mjs            # headless Chrome E2E driver (dev tool, no npm deps)
@@ -391,9 +429,20 @@ dependencies. This harness may know demo-site specifics; the extension may not.
 
 ```bash
 node scripts/e2e_cdp.mjs --snapshot            # print the sanitized IR of the demo page
+node scripts/e2e_cdp.mjs --ir-audit            # prefilled fields and custom widgets: no value may reach the raw IR
 node scripts/e2e_cdp.mjs --exec-check          # exercise executor primitives directly
 node scripts/e2e_cdp.mjs --dashboard --task "…" [--confirm allow|deny] [--answer "…"] [--stop-after-ms N] [--close-panel-after-ms N]
 ```
+
+More options (all documented at the top of the script):
+- `--headed` and `--real-panel` run a visible Chrome with the real Chrome side panel.
+- `--shots DIR` saves dashboard screenshots at 1440, 1024 and 390 px.
+- `--stop-when-stage S` and `--close-after-verified N` time Stop and panel close.
+- `--stale-once`, `--reject-input ID` and `--inject-attack` add harness-side page fixtures (a stale target, a field
+  that rejects script input, prompt-injection and placeholder look-alike text).
+- With `--dashboard`, it prints causal-order evidence: event emit times against the page's own input timestamps and
+  the dashboard arrival times.
+- It reports demo field state as filled/empty only.
 
 ---
 
@@ -404,26 +453,37 @@ make test          # all of the below
 make typecheck     # extension: tsc --noEmit
 make test-ext      # extension: vitest
 make test-server   # server: pytest
+make test-dashboard  # dashboard reducer: node --test (no dependencies)
 make leaks         # canary leak check (the telemetry part needs the server running)
 ```
 
 What the suites cover:
 - **vitest (extension):**
-  - normalizer and detectors (including the extent of cue-less addresses);
+  - normalizer and detectors, including a table of address phrasings (cues, "X as my address", no PIN, lowercase,
+    followed by another instruction), page-text false positives and `ask_user` answer masking;
   - Luhn/Verhoeff/PAN checksums;
   - placeholder reuse and vault views;
   - every egress gate rule, including the tripwire and mask-once-then-block;
-  - validator V1–V4, T1–T4 and R1;
-  - submit-like detection and field categories.
+  - validator V1–V4, T1–T4 and R1, including the list of rules each verdict reports as evaluated;
+  - submit-like detection and field categories;
+  - the telemetry event shapes the dashboard uses pass the gate, and a leaky one would be stopped;
+  - the agent loop itself (`agent.test.ts`: mocked Chrome seam, test-only scripted planner). It covers causal
+    order, denied Save, stale targets, T4 smuggling, unknown placeholders, consecutive malformed responses, Stop
+    while planning/executing/waiting, panel close and `ask_user` sanitization.
 - **pytest (server):**
   - payload validation;
   - response validation and repair (with a **test-only** scripted provider);
   - provider errors → 502, no provider → 503;
   - the telemetry relay and CORS;
   - `GroqProvider`: request shape, strict-schema rules and the scroll merge/restore, error mapping, and
-    429/5xx/timeout retries within the budget. These tests use `httpx.MockTransport`: no network, no key.
-- **`scripts/check_leaks.py`:** seeds 9 known sensitive values (the demo-site values and the representative task's
-  values). It searches everything the backend logged, plus the relay's current telemetry state with `--telemetry`, for
+    429/5xx/timeout/`json_validate_failed` retries within the budget. These tests use `httpx.MockTransport`: no network, no key.
+- **node:test (dashboard):** the reducer that turns events into the dashboard's state. It covers the success path,
+  denied Save, Stop while planning, panel close, egress block, planner failure, no fabricated progress, unknown future
+  events, the payload re-check, out-of-order arrival, in-flight and after-Stop actions, "N/A this step" versus
+  task-wide history, and missing events never becoming passed.
+- **`scripts/check_leaks.py`:** seeds 19 known synthetic values: the demo-site values, the representative task's
+  values, an adversarial set (lowercase prose, `+91` phone, PAN, a cue-less address, mixed-case email), and IR-audit
+  fixture values. It searches everything the backend logged, plus the relay's current telemetry state with `--telemetry`, for
   exact, lowercase and digits-only matches. It prints only labels and locations, never the values, and exits 1 on any
   match.
 
@@ -432,9 +492,10 @@ Latest results (see `docs/PROGRESS.md`):
 | Check | Result |
 |---|---|
 | `tsc --noEmit` | clean |
-| vitest | 53 / 53 passing |
-| pytest | 54 / 54 passing |
-| `check_leaks.py --telemetry` | 0 of 9 seeded values in the payloads and telemetry of the real-Groq runs (2026-09-28: 24 payloads, 36 events) |
+| vitest | 116 / 116 passing (4 files) |
+| pytest | 57 / 57 passing |
+| dashboard (node:test) | 14 / 14 passing |
+| `check_leaks.py --telemetry` | 0 of 19 seeded values in 128 logged planner payloads and the latest session's telemetry (2026-09-29, release-candidate validation) |
 
 The leak-check result covers the specific synthetic values and runs tested so far. It is evidence for those runs, not
 a general guarantee. The first live multi-step run on 2026-09-25 did leak address fragments (see the incident log). That led to a fix in
@@ -451,6 +512,8 @@ address detection, and the result above is from after the fix.
   - The T1 credential hand-off has not been validated live, because the demo page has no credential or card field.
     It is unit-tested.
   - Stop and panel close halt the loop before the next dispatch. An action already sent to the page still completes.
+    After Stop its result is reported (flagged "after Stop") but not verified; after a panel close it is shown as
+    "may have run; result not observed".
 - **Planner quality (`openai/gpt-oss-20b`):**
   - It phrases `ask_user` questions awkwardly ("provide a placeholder for the address"). This still works, because the
     answer is sanitized locally.
@@ -461,10 +524,12 @@ address detection, and the result above is from after the fix.
   - The provider waits out `retry-after` only within its 25 s budget, which made one step take about 20 s in testing.
   - If the wait doesn't fit, the task stops with "Planner error: … rate limit reached".
 - **Detection is heuristic; there is no NER.**
-  - Names are found through contextual cues.
-  - Addresses are found through cues ("my address …"), or through a 6-digit PIN code near address words, grown to
-    the surrounding address tokens. An address with neither a cue nor a PIN is not detected.
-  - This gap was exposed live: see [Privacy incident log](#privacy-incident-log).
+  - Names are found through contextual cues, or as the answer to a name question.
+  - Addresses are found through cues ("my address is …", "address …", "… as my address", "… in the address field"),
+    house-number/street shapes ("Flat 3B", "12 MG Road"), a 6-digit PIN near address words, or as the answer to an
+    address question. Each is grown to the surrounding address tokens and stops at instruction words, other fields and
+    sentence ends. Page text with none of these (for example "Shivajinagar Pune" alone) is not detected.
+  - These gaps were exposed live: see [Privacy incident log](#privacy-incident-log).
   - DOB becomes `[REDACTED_TEXT]` rather than a typed placeholder.
   - Obfuscated emails are not detected.
   - Cue false positives are possible.
@@ -476,7 +541,13 @@ address detection, and the result above is from after the fix.
   - per-origin runtime permissions;
   - `navigate` / `inspect` actions and action batching;
   - Firefox, WebGPU, benchmarks.
-- **Dashboard:** `ERROR` events appear in the timeline but don't light a stage. Panel-close telemetry is best-effort.
+- **Dashboard:**
+  - It shows the latest session only, since the relay is in memory. Panel-close telemetry is best-effort.
+  - Server-side retries and repair attempts are not visible to the extension; they show up only as planner latency.
+  - The leak check is not part of the live stream.
+  - The local question VEIL asks after 2 consecutive failures emits no event of its own until it is answered.
+  - Telemetry is delivered after the fact (a few ms locally; a background dashboard tab repaints about once a second),
+    so the page can change before the dashboard shows the proposal that caused it. The timeline shows the true order.
 
 The full list is in `docs/PROGRESS.md` → "Open items".
 
@@ -495,13 +566,26 @@ The full list is in `docs/PROGRESS.md` → "Open items".
   output. This was confirmed again in the 2026-09-28 live validation.
 - Full write-up: `docs/PROGRESS.md` → "Security incident 2026-09-25 (resolved)".
 
+**2026-09-28: address under- and over-masking in task text (resolved, found in manual testing).**
+- **What happened:** with a custom task, the email was masked but a natural-language address was not ("fill address
+  X", "use this address X", "X as my address"). The raw address reached the planner, which proposed typing it
+  literally. In another phrasing the address was detected, but its span swallowed the following words
+  ("… and email is …", "… and do not submit").
+- **Root cause:** the only cues were "my address (is)" / "address:" / "address is"; the value then ran to a sentence
+  end or to a short list of clause starters, and overlapping detections were merged into the address.
+- **Fix:** one generic token-boundary engine for all address detectors: cue variants, suffix cues, house-number/street
+  shapes and the PIN path. It stops at instruction words, other field labels, other PII and connectors that start a
+  new clause. An `ask_user` answer is masked whole when the question asked for an address or name.
+- Regression tests cover 31 phrasings plus page-text false positives. The live matrix was re-run, and the leak check
+  found 0 of 19. Write-up: `docs/PROGRESS.md` → "Hardening pass 2026-09-28".
+
 ---
 
 ## Next Development Phase
 
 From `docs/ROADMAP.md` and `docs/PROGRESS.md`:
 
-1. **Phase 1 is frozen** (2026-09-28). The remaining Phase 1 item is dashboard polish (M8).
+1. **Phase 1 is frozen** (2026-09-28), and **M8 (dashboard completion) is done** (2026-09-28).
 2. **Then decide the next phase together.** None of the phases below is started automatically.
 3. **Real-website compatibility:** from the demo site to simple external forms, dynamic React sites and more complex
    pages (never live banking or government sites).

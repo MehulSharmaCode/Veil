@@ -52,7 +52,12 @@ describe('V1 action schema', () => {
 describe('validator', () => {
   it('allows a compatible placeholder into a matching field', () => {
     const { c } = ctx(all);
-    expect(validateAction({ type: 'type', target: 'e1', text: '[EMAIL_1]' }, c)).toEqual({ kind: 'allow', confirm: [], placeholder: '[EMAIL_1]' });
+    expect(validateAction({ type: 'type', target: 'e1', text: '[EMAIL_1]' }, c)).toEqual({
+      kind: 'allow',
+      confirm: [],
+      checked: ['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'T1_CREDENTIAL', 'T2_CATEGORY', 'T3_ORIGIN'],
+      placeholder: '[EMAIL_1]',
+    });
     expect(validateAction({ type: 'type', target: 'e2', text: '[ADDRESS_1]' }, c).kind).toBe('allow');
   });
   it('V2: rejects targets not in the latest snapshot', () => {
@@ -101,6 +106,23 @@ describe('validator', () => {
     const v = validateAction({ type: 'click', target: 'e5' }, c);
     expect(v).toMatchObject({ kind: 'allow', confirm: [{ rule: 'R1_SUBMIT_LIKE' }] });
   });
+  it('reports exactly the rules it evaluated (telemetry evidence)', () => {
+    const { c } = ctx(all);
+    const checked = (a: Parameters<typeof validateAction>[0]) => {
+      const v = validateAction(a, c);
+      return v.kind === 'allow' ? v.checked : v.kind;
+    };
+    expect(checked({ type: 'done', summary: 'ok' })).toEqual(['V1_ACTION']);
+    expect(checked({ type: 'scroll', direction: 'down', amount_px: 300 })).toEqual(['V1_ACTION']);
+    expect(checked({ type: 'scroll', target: 'e6' })).toEqual(['V1_ACTION', 'V2_TARGET']);
+    expect(checked({ type: 'click', target: 'e5' })).toEqual(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'R1_SUBMIT_LIKE']);
+    expect(checked({ type: 'select', target: 'e7', option: 'x' })).toEqual(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY']);
+    expect(checked({ type: 'type', target: 'e2', text: 'hello there' })).toEqual(['V1_ACTION', 'V2_TARGET', 'V4_SUITABILITY', 'T1_CREDENTIAL', 'T4_SMUGGLING']);
+    // Rejections and hand-offs carry their rule instead of a checked list.
+    expect(checked({ type: 'type', target: 'e3', text: '[EMAIL_1]' })).toBe('handoff');
+    expect(checked({ type: 'type', target: 'e9', text: '[EMAIL_1]' })).toBe('reject');
+  });
+
   it('V2/V3 live checks', () => {
     expect(validateLive(emailField, { exists: true, visible: true, occluded: false, fingerprint: 'fe1' })).toBeNull();
     expect(validateLive(emailField, { exists: true, visible: true, occluded: false, fingerprint: 'zzz' })).toMatchObject({ rule: 'V3_FINGERPRINT' });

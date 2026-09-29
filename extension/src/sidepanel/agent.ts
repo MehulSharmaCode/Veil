@@ -8,14 +8,30 @@ import type { ExecCommand, ExecResponse, InspectResponse, SnapshotResponse } fro
 import { ensureContentScript, getActiveTab, sendToTab } from '../platform/chrome';
 import { Vault } from '../privacy/vault';
 import { Sanitizer, type Detection } from '../privacy/sanitizer';
+import { expectedAnswerCategory } from '../privacy/detectors';
 import type { SanitizedText } from '../privacy/sanitized';
 import { EgressClient, type GateReport } from '../egress/client';
+import { GATE_RULES } from '../egress/gate';
 import { buildPlannerPayload, sanitizeSnapshot, type SanitizedSnapshot } from '../egress/payload';
 import type { HistoryEntry, PlannerPayload } from '../egress/schema';
 import { validateAction, validateLive, POLICY_RULES, type Concern, type PolicyRule } from '../policy/validator';
 import { newSessionId, Telemetry } from '../telemetry/telemetry';
 
 export type Outcome = 'done' | 'stopped' | 'max_steps' | 'blocked' | 'error' | 'panel_closed';
+
+/** Planner identity as reported by the backend's /health (metadata only; shown on the dashboard). */
+export interface PlannerInfo {
+  provider: string;
+  model: string;
+  effort: string | null;
+}
+
+const META_RE = /^[\w.\/:-]{1,80}$/;
+/** Keep only plain identifier-like strings (never free text) for planner metadata telemetry. */
+function plannerMeta(p: PlannerInfo | null | undefined): Record<string, string | null> | null {
+  if (!p || !META_RE.test(p.provider) || !META_RE.test(p.model)) return null;
+  return { provider: p.provider, model: p.model, effort: p.effort && META_RE.test(p.effort) ? p.effort : null };
+}
 
 /** Everything the UI shows comes through here and is placeholder-only. */
 export interface AgentUI {
@@ -82,7 +98,10 @@ export class Agent {
   private taskOrigin = '';
   private task = '' as SanitizedText;
 
-  constructor(private readonly ui: AgentUI) {
+  constructor(
+    private readonly ui: AgentUI,
+    private readonly opts: { planner?: PlannerInfo | null } = {},
+  ) {
     this.egress = new EgressClient({
       secrets: () => this.vault.secretForms(),
       failClosed: () => this.sanitizer.failClosed(),
@@ -112,7 +131,12 @@ export class Agent {
       const r = this.sanitizer.sanitizeWithReport(rawTask, { source: 'task', origin });
       this.task = r.text;
       this.ui.task(r.text);
-      this.telemetry.emit('TASK_STARTED', 'task', { task: r.text, origin: this.sanitizer.sanitize(origin, { source: 'page', origin }) });
+      this.telemetry.emit('TASK_STARTED', 'task', {
+        task: r.text,
+        origin: this.sanitizer.sanitize(origin, { source: 'page', origin }),
+        planner: plannerMeta(this.opts.planner),
+        limits: { max_steps: CONFIG.MAX_STEPS, max_actions_per_step: CONFIG.MAX_ACTIONS_PER_STEP, max_consecutive_failures: CONFIG.MAX_CONSECUTIVE_FAILURES },
+      });
       this.reportDetections('task', r.detections);
 
       await this.loop();
@@ -121,7 +145,7 @@ export class Agent {
       const code = e instanceof AgentError ? e.code : 'UNEXPECTED';
       const msg = e instanceof AgentError ? e.message : 'Unexpected error (see side panel console).';
       if (!(e instanceof AgentError)) console.error('VEIL agent error', e instanceof Error ? e.name : 'error');
-      this.telemetry.emit('ERROR', 'error', { code });
+      this.telemetry.emit('ERROR', 'error', { code, reason: this.sanitizeOwn(msg) });
       this.finish('error', msg);
     }
   }
@@ -161,16 +185,17 @@ export class Agent {
 
       const plan = await this.plan(san);
       this.check();
-      if (!plan) continue; // invalid response already recorded as a failure
-
-      const action = plan.actions[0];
-      if (plan.actions.length > CONFIG.MAX_ACTIONS_PER_STEP) this.ui.log(`planner proposed ${plan.actions.length} actions; v0.1 executes only the first`, 'warn');
-      if (!action) {
-        if (plan.status === 'done') return this.finish('done', plan.message || 'Task complete.');
-        this.recordFailure({ type: 'wait', ms: 0 }, 'rejected', 'V1_ACTION', 'planner returned no action');
-        continue;
+      // An invalid response is already recorded as a failure; it still counts toward the limit below.
+      const action = plan?.actions[0];
+      if (plan && plan.actions.length > CONFIG.MAX_ACTIONS_PER_STEP) this.ui.log(`planner proposed ${plan.actions.length} actions; v0.1 executes only the first`, 'warn');
+      if (plan && !action) {
+        if (plan.status === 'done') {
+          this.telemetry.emit('ACTION_VALIDATED', 'validate', { action: { type: 'done', summary: plan.message.slice(0, 300) }, confirm: [], checks: ['V1_ACTION'] });
+          return this.finish('done', plan.message || 'Task complete.');
+        }
+        this.recordFailure(null, 'rejected', 'V1_ACTION', 'planner returned no action');
       }
-      await this.handle(action, raw, san);
+      if (action) await this.handle(action, raw, san);
       if (this.finished) return;
 
       if (this.failures >= CONFIG.MAX_CONSECUTIVE_FAILURES) {
@@ -204,7 +229,20 @@ export class Agent {
       interactive: san.elements
         .filter((e) => e.kind === 'interactive')
         .slice(0, 40)
-        .map((e) => ({ id: e.id, role: e.role, name: e.name, value_category: e.state.value_category ?? null, has_value: e.state.has_value ?? null })),
+        .map((e) => ({
+          id: e.id,
+          role: e.role,
+          tag: e.tag,
+          input_type: e.input_type ?? null,
+          name: e.name,
+          value_category: e.state.value_category ?? null,
+          has_value: e.state.has_value ?? null,
+          // Structural flags only (never values). Fingerprints stay local (V3) and are not sent.
+          flags: {
+            editable: !!e.state.editable, disabled: !!e.state.disabled, required: !!e.state.required, submitter: !!e.state.submitter,
+            in_viewport: e.in_viewport, occluded: e.occluded,
+          },
+        })),
     });
     this.reportDetections('page', san.detections);
     this.telemetry.emit('SANITIZATION_COMPLETE', 'sanitize', {
@@ -231,7 +269,8 @@ export class Agent {
 
   private onGate(r: GateReport): void {
     if (r.kind !== 'plan') return; // telemetry gate results are reported via onBlocked only (no recursion)
-    const data = { attempt: r.attempt, bytes: r.bytes, failures: r.failures };
+    // checkEgress evaluates every rule on every message, so the full rule list is what was checked.
+    const data = { attempt: r.attempt, bytes: r.bytes, failures: r.failures, rules_checked: Object.keys(GATE_RULES) };
     if (r.phase === 'passed') this.telemetry.emit('EGRESS_CHECK_PASSED', 'egress', data);
     else if (r.phase === 'failed') this.telemetry.emit('EGRESS_CHECK_FAILED', 'egress', data);
     else this.telemetry.emit('EGRESS_BLOCKED', 'egress', data);
@@ -269,7 +308,14 @@ export class Agent {
       this.finish('blocked', 'Outbound payload blocked by the egress gate. Task paused; nothing was sent.');
       throw new Stopped();
     }
-    this.telemetry.emit('REQUEST_SENT', 'egress', { bytes: res.gate.bytes, payload: res.message });
+    // Emitted once the response headers are back (the gate result above marks the dispatch moment).
+    this.telemetry.emit('REQUEST_SENT', 'egress', {
+      request_id: `${this.sessionId}-${this.step}`,
+      bytes: res.gate.bytes,
+      http_status: res.response.status,
+      response_ms: Math.round(performance.now() - t0),
+      payload: res.message,
+    });
 
     let body: unknown;
     try {
@@ -284,12 +330,12 @@ export class Agent {
     }
     const parsed = PlanResponseSchema.safeParse(body);
     if (!parsed.success) {
-      this.telemetry.emit('ACTION_REJECTED', 'validate', { rule: 'V1_ACTION', reason: 'planner response failed local schema validation' });
-      this.recordFailure({ type: 'wait', ms: 0 }, 'rejected', 'V1_ACTION', 'invalid planner response');
+      this.recordFailure(null, 'rejected', 'V1_ACTION', 'planner response failed local schema validation');
       return null;
     }
     const plan = parsed.data;
-    this.telemetry.emit('LLM_ACTION_RECEIVED', 'plan', { status: plan.status, actions: plan.actions, message: plan.message, latency_ms: latency });
+    // Emitted only after the response passed the local zod schema (V1).
+    this.telemetry.emit('LLM_ACTION_RECEIVED', 'plan', { status: plan.status, actions: plan.actions, message: plan.message, latency_ms: latency, schema: 'valid' });
     this.ui.log(`planner (${latency} ms): ${plan.message || plan.status}`);
     return plan;
   }
@@ -301,18 +347,19 @@ export class Agent {
     const label = describe(action, 'target' in action ? sanById.get(action.target) : undefined);
 
     if (action.type === 'done') {
-      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [] });
+      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [], checks: ['V1_ACTION'] });
       return this.finish('done', action.summary || 'Task complete.');
     }
     if (action.type === 'ask_user') {
-      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [] });
+      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [], checks: ['V1_ACTION'] });
       await this.askUser(action.question, action);
       return;
     }
     if (action.type === 'wait') {
-      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [] });
+      this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: [], checks: ['V1_ACTION'] });
       this.ui.stage('execute', label);
       await this.sleep(action.ms);
+      this.check(); // a Stop during the wait ends the task; the wait did not complete
       this.telemetry.emit('ACTION_EXECUTED', 'execute', { action, ok: true });
       this.pushHistory(action, 'ok');
       return;
@@ -350,7 +397,16 @@ export class Agent {
         return this.recordFailure(action, liveVerdict.rule === 'V3_FINGERPRINT' ? 'stale_target' : 'rejected', liveVerdict.rule, liveVerdict.reason);
       }
     }
-    this.telemetry.emit('ACTION_VALIDATED', 'validate', { action, confirm: verdict.confirm.map((c) => c.rule) });
+    const taint = verdict.placeholder
+      ? { placeholder: verdict.placeholder, placeholder_category: this.vault.getEntry(verdict.placeholder)?.category ?? null, field_category: snapEl?.state.value_category ?? 'free_text' }
+      : null;
+    this.telemetry.emit('ACTION_VALIDATED', 'validate', {
+      action,
+      confirm: verdict.confirm.map((c) => c.rule),
+      checks: verdict.checked,
+      live_checks: snapEl ? ['V2_TARGET', 'V3_FINGERPRINT'] : [],
+      taint,
+    });
 
     if (verdict.confirm.length) {
       const ok = await this.confirm(action, label, verdict.confirm);
@@ -364,18 +420,26 @@ export class Agent {
     // Resolve locally and execute. The real value exists only inside this call.
     this.ui.stage('execute', label);
     const cmd = this.toCommand(action, verdict.placeholder);
+    if (taint) {
+      // The real value now exists only in `cmd`, which goes to the content script for this one action.
+      this.telemetry.emit('PLACEHOLDER_RESOLVED', 'resolve', { placeholder: taint.placeholder, category: taint.placeholder_category, target: 'target' in action ? action.target : null });
+    }
     let exec: ExecResponse;
     try {
-      exec = await this.content<ExecResponse>({ type: 'execute', command: cmd, expectedFingerprint: snapEl?.fingerprint });
+      // Dispatched here: from now on the action cannot be recalled by Stop or panel close.
+      exec = await this.content<ExecResponse>({ type: 'execute', command: cmd, expectedFingerprint: snapEl?.fingerprint }, { afterStop: 'return' });
     } catch (e) {
       if (e instanceof Stopped) throw e;
       if (action.type !== 'click') throw e;
       // A click that navigates tears down the content script; treat as a state change.
       exec = { ok: true, mutations: 0, settle_ms: 0, settled: false, changed: true };
       await this.sleep(800);
-      await ensureContentScript(this.tabId);
+      if (!this.stopped) await ensureContentScript(this.tabId);
     }
-    this.telemetry.emit('ACTION_EXECUTED', 'execute', { action, ok: exec.ok, error: exec.error ?? null, mutations: exec.mutations, settle_ms: exec.settle_ms, settled: exec.settled });
+    // Reported even if Stop came while it ran (then flagged): the page changed, and the record must say so.
+    const afterStop = this.stopped;
+    this.telemetry.emit('ACTION_EXECUTED', 'execute', { action, ok: exec.ok, error: exec.error ?? null, mutations: exec.mutations, settle_ms: exec.settle_ms, settled: exec.settled, ...(afterStop ? { after_stop: true } : {}) });
+    this.check(); // nothing after this one action once stopped: no verification, no next step
     if (!exec.ok) {
       return this.recordFailure(action, exec.error === 'stale' ? 'stale_target' : 'exec_error', exec.error === 'stale' ? 'V3_FINGERPRINT' : undefined, `execution failed: ${exec.error}`);
     }
@@ -429,7 +493,8 @@ export class Agent {
     this.telemetry.emit('CONFIRMATION_REQUESTED', 'confirm', { action, rules: concerns.map((c) => c.rule) });
     const ok = await this.ui.confirm(`Allow: ${label}?`, concerns.map((c) => `${c.rule}: ${c.reason}`));
     this.check();
-    this.telemetry.emit('CONFIRMATION_RESOLVED', 'confirm', { action, approved: ok });
+    // A denial returns to the loop without executing (see handle()).
+    this.telemetry.emit('CONFIRMATION_RESOLVED', 'confirm', { action, approved: ok, result: ok ? 'proceed' : 'blocked_not_executed' });
     return ok;
   }
 
@@ -438,7 +503,10 @@ export class Agent {
     const answer = await this.ui.ask(question);
     this.check();
     if (answer === null) return this.stop();
-    const r = this.sanitizer.sanitizeWithReport(answer, { source: 'user_answer', origin: this.taskOrigin });
+    // The question tells the sanitizer what a cue-less answer holds ("What is your address?" → ADDRESS).
+    const r = this.sanitizer.sanitizeWithReport(answer, { source: 'user_answer', origin: this.taskOrigin, expect: expectedAnswerCategory(question) });
+    // The sanitized answer is exactly what the planner receives in history.user_answer.
+    this.telemetry.emit('USER_ANSWERED', 'ask', { answer: r.text.slice(0, 300), placeholders: [...new Set(r.detections.map((d) => d.placeholder))] });
     this.reportDetections('user_answer', r.detections);
     this.pushHistory(action ?? { type: 'ask_user', question: question.slice(0, 300) }, 'answered', undefined, r.text);
   }
@@ -457,13 +525,19 @@ export class Agent {
     return this.sanitizer.sanitize(text, { source: 'page', origin: this.taskOrigin, keepPlaceholders: true });
   }
 
-  private recordFailure(action: Action, result: HistoryEntry['result'], rule: PolicyRule | 'V1_ACTION' | undefined, reason: string): void {
+  /**
+   * `action: null` = the planner response itself was unusable (no valid action). Telemetry then carries
+   * no action (the planner proposed none); the planner's history gets a neutral `wait 0` placeholder
+   * entry, because a history entry needs an action type, so it learns its last response was rejected.
+   */
+  private recordFailure(action: Action | null, result: HistoryEntry['result'], rule: PolicyRule | 'V1_ACTION' | undefined, reason: string): void {
     this.failures++;
+    const safeReason = this.sanitizeOwn(reason);
     // verify failures are already reported by VERIFICATION_COMPLETE(passed=false)
-    if (result === 'exec_error') this.telemetry.emit('ERROR', 'execute', { code: 'EXEC_FAILED', action, reason: this.sanitizeOwn(reason) });
-    else if (result !== 'verify_failed') this.telemetry.emit('ACTION_REJECTED', 'validate', { action, rule: rule ?? null, result, reason: this.sanitizeOwn(reason) });
-    this.ui.log(`${describe(action)}: ${result}${rule ? ` [${rule}]` : ''} — ${reason}`, 'warn');
-    this.pushHistory(action, result, rule);
+    if (result === 'exec_error') this.telemetry.emit('ERROR', 'execute', { code: 'EXEC_FAILED', action, reason: safeReason });
+    else if (result !== 'verify_failed') this.telemetry.emit('ACTION_REJECTED', 'validate', { ...(action ? { action } : {}), rule: rule ?? null, result, reason: safeReason });
+    this.ui.log(`${action ? describe(action) : 'planner response'}: ${result}${rule ? ` [${rule}]` : ''} — ${reason}`, 'warn');
+    this.pushHistory(action ?? { type: 'wait', ms: 0 }, result, rule);
   }
 
   private pushHistory(action: Action, result: HistoryEntry['result'], rule?: string, userAnswer?: SanitizedText): void {
@@ -473,7 +547,12 @@ export class Agent {
     this.history = [...this.history, e].slice(-CONFIG.HISTORY_LENGTH);
   }
 
-  private async content<R>(msg: Parameters<typeof sendToTab>[1]): Promise<R> {
+  /**
+   * One content-script request. The stop flag is checked synchronously right before dispatch, so
+   * nothing new reaches the page after Stop. `afterStop: 'return'` hands back the result of a request
+   * that was already dispatched when Stop came (an execute), so the caller can report it honestly.
+   */
+  private async content<R>(msg: Parameters<typeof sendToTab>[1], opts: { afterStop?: 'throw' | 'return' } = {}): Promise<R> {
     this.check();
     let res: { ok: boolean; error?: string } & R;
     try {
@@ -484,7 +563,7 @@ export class Agent {
       if (!(await ensureContentScript(this.tabId))) throw new AgentError('NO_CONTENT_SCRIPT', 'Lost the page (navigated or closed).');
       res = await sendToTab<typeof res>(this.tabId, msg);
     }
-    this.check();
+    if (opts.afterStop !== 'return') this.check();
     if (!res || (res.ok === false && msg.type !== 'execute')) throw new AgentError('CONTENT_ERROR', `Content script error: ${res?.error ?? 'no response'}`);
     return res;
   }

@@ -133,13 +133,15 @@ export function collapse(s: string | null | undefined, cap: number = CONFIG.TEXT
 
 /** Visible text of an element, skipping form-control contents (which are values, not labels). */
 export function labelText(root: Element): string {
+  // A value widget's content is its value, even when another control points at it (aria-labelledby).
+  if (isValueBearing(root)) return '';
   let out = '';
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
     acceptNode(n) {
       if (n.nodeType === Node.ELEMENT_NODE) {
         const tag = (n as Element).tagName.toLowerCase();
         if (['select', 'textarea', 'input', 'script', 'style', 'template', 'noscript'].includes(tag)) return NodeFilter.FILTER_REJECT;
-        if ((n as HTMLElement).isContentEditable) return NodeFilter.FILTER_REJECT;
+        if ((n as HTMLElement).isContentEditable || isValueBearing(n as Element)) return NodeFilter.FILTER_REJECT;
         if ((n as Element).getAttribute('aria-hidden') === 'true') return NodeFilter.FILTER_REJECT;
         return NodeFilter.FILTER_SKIP;
       }
@@ -150,11 +152,20 @@ export function labelText(root: Element): string {
   return collapse(out);
 }
 
-function isValueBearing(el: Element): boolean {
+/**
+ * ARIA roles whose element content is the control's value (custom widgets built from divs/spans). Their
+ * text must never be read as a name or caption.
+ */
+export const VALUE_ROLES = new Set(['textbox', 'searchbox', 'spinbutton', 'combobox']);
+
+/** A control whose content is user data (a value), not a label: never read its text into the IR. */
+export function isValueBearing(el: Element): boolean {
   const tag = el.tagName.toLowerCase();
   if (tag === 'textarea' || tag === 'select') return true;
   if (tag === 'input') return !['button', 'submit', 'reset', 'image'].includes((el as HTMLInputElement).type);
-  return isEditingHost(el);
+  if (isEditingHost(el)) return true;
+  const role = el.getAttribute('role')?.trim().split(/\s+/)[0]?.toLowerCase();
+  return !!role && VALUE_ROLES.has(role);
 }
 
 /** aria-labelledby → aria-label → <label for> / wrapping <label> → placeholder → title → own text. */

@@ -1,6 +1,6 @@
 PY := server/.venv/bin/python
 
-.PHONY: setup ext ext-watch server demo dashboard dev test test-ext test-server typecheck leaks
+.PHONY: setup ext ext-watch server demo dashboard dev test test-ext test-server test-dashboard typecheck leaks
 
 setup:
 	cd extension && npm install
@@ -35,7 +35,11 @@ test-ext:
 test-server:
 	cd server && .venv/bin/python -m pytest -q
 
-test: typecheck test-ext test-server
+# Dashboard reducer (node:test, no dependencies).
+test-dashboard:
+	node --test dashboard/test/model.test.mjs
+
+test: typecheck test-ext test-server test-dashboard
 
 leaks:
 	$(PY) scripts/check_leaks.py --telemetry

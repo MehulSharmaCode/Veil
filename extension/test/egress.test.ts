@@ -142,6 +142,41 @@ describe('egress gate', () => {
   });
 });
 
+describe('M8 dashboard telemetry shapes', () => {
+  const ev = (type: string, stage: string, data: Record<string, unknown>) => ({
+    event_id: 'abcdefgh12', ts: 1, session_id: 'abcdefghijklmnop', step: 1, type, stage, data,
+  });
+  function vaultWithTask() {
+    const vault = new Vault();
+    const s = new Sanitizer(vault);
+    const task = s.sanitize('Fill my email mehul.test@example.com and my address 12 MG Road, Shivajinagar, Pune 411005.', { source: 'task', origin: ORIGIN });
+    return { vault, task };
+  }
+  it('the new/extended event shapes pass the telemetry gate with placeholders only', () => {
+    const { vault, task } = vaultWithTask();
+    const secrets = vault.secretForms();
+    const events = [
+      ev('TASK_STARTED', 'task', { task, origin: ORIGIN, planner: { provider: 'groq', model: 'openai/gpt-oss-20b', effort: 'medium' }, limits: { max_steps: 15, max_actions_per_step: 1, max_consecutive_failures: 2 } }),
+      ev('EGRESS_CHECK_PASSED', 'egress', { attempt: 1, bytes: 7000, failures: [], rules_checked: ['G0_GATE_ERROR', 'G1_SCHEMA', 'G7_SIZE'] }),
+      ev('LLM_ACTION_RECEIVED', 'plan', { status: 'continue', actions: [{ type: 'type', target: 'e10', text: '[EMAIL_1]' }], message: 'Fill email', latency_ms: 800, schema: 'valid' }),
+      ev('ACTION_VALIDATED', 'validate', { action: { type: 'type', target: 'e10', text: '[EMAIL_1]' }, confirm: [], checks: ['V1_ACTION', 'T2_CATEGORY'], live_checks: ['V2_TARGET', 'V3_FINGERPRINT'], taint: { placeholder: '[EMAIL_1]', placeholder_category: 'EMAIL', field_category: 'email' } }),
+      ev('PLACEHOLDER_RESOLVED', 'resolve', { placeholder: '[EMAIL_1]', category: 'EMAIL', target: 'e10' }),
+      ev('CONFIRMATION_RESOLVED', 'confirm', { action: { type: 'click', target: 'e14' }, approved: false, result: 'blocked_not_executed' }),
+      ev('USER_ANSWERED', 'ask', { answer: '[ADDRESS_1]', placeholders: ['[ADDRESS_1]'] }),
+      ev('ERROR', 'error', { code: 'PLANNER_ERROR', reason: 'Planner error: rate limit reached; retry in ~12 s' }),
+    ];
+    for (const e of events) expect(checkEgress('telemetry', e, secrets).failures, e.type).toEqual([]);
+  });
+  it('a resolution or answer event that carried a real value would be stopped by the gate', () => {
+    const { vault } = vaultWithTask();
+    const secrets = vault.secretForms();
+    const leakyResolve = ev('PLACEHOLDER_RESOLVED', 'resolve', { placeholder: '[EMAIL_1]', category: 'EMAIL', target: 'mehul.test@example.com' });
+    expect(checkEgress('telemetry', leakyResolve, secrets).failures.map((f) => f.rule)).toContain('G6_TRIPWIRE');
+    const leakyAnswer = ev('USER_ANSWERED', 'ask', { answer: '12 MG Road, Shivajinagar, Pune 411005', placeholders: [] });
+    expect(checkEgress('telemetry', leakyAnswer, secrets).ok).toBe(false);
+  });
+});
+
 describe('egress client: retry-then-block', () => {
   afterEach(() => vi.unstubAllGlobals());
 

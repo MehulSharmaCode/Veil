@@ -10,8 +10,9 @@ Real privacy-preserving agent loop on DOM-accessible content: snapshot → IR �
 gate → hosted LLM planner → local validation/taint/confirmation → local resolution → execution → verification.
 Milestones M1–M8 are tracked in `PROGRESS.md`.
 
-Status: M1–M7 done. **Phase 1 was frozen on 2026-09-28**, with documented manual limitations (`PROGRESS.md` →
-"Live validation 2026-09-28"). M8 polish remains.
+Status: M1–M8 done. **Phase 1 was frozen on 2026-09-28**, with documented manual limitations (`PROGRESS.md` →
+"Live validation 2026-09-28"). **M8 (dashboard completion) was done on 2026-09-28** (`PROGRESS.md` → "M8 dashboard
+completion").
 - **Done (1a):** planner provider swapped to Groq `openai/gpt-oss-20b` (server provider layer only, plus a
   provider-local strict-schema adaptation). Details are in `PROGRESS.md` → "Next session".
 - **Done (1b, headless):**
@@ -23,7 +24,12 @@ Status: M1–M7 done. **Phase 1 was frozen on 2026-09-28**, with documented manu
   - live validation in a visible Chrome with the real side panel: tests A–G, including Stop and panel close;
   - `make leaks` 0/9;
   - freeze commit "Freeze Veil Phase 1".
-- **Next:** M8 polish, then discuss the next phase with the user. Sections 2–5 are not started, and none of
+- **Done (M8, 2026-09-28):** proof-oriented dashboard over the real telemetry stream, with privacy-safe
+  instrumentation through the existing gate.
+- **Done (hardening, 2026-09-28):** a final v0.1 bug-discovery and hardening pass (address detection boundaries,
+  IR value leak via ARIA widgets, Stop/failure truthfulness, dashboard scope/ordering), re-validated live
+  (`PROGRESS.md` → "Hardening pass 2026-09-28").
+- **Next:** discuss the next phase with the user. Sections 2–5 are not started, and none of
   them, OCR/vision included, is started automatically.
 
 ## 2. Real-website compatibility

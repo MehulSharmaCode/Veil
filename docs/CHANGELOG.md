@@ -282,3 +282,228 @@ Entry template:
   - README status and limitations are updated.
 - **Git commit:** "Freeze Veil Phase 1". It also includes the uncommitted 2026-09-28 documentation reconciliation
   above.
+
+## 2026-09-28: M8 dashboard completion (proof surface)
+
+- **Phase / milestone:** M8 (the last v0.1 milestone), after the Phase 1 freeze.
+- **Objective:** make the real VEIL pipeline visibly understandable to judges from real telemetry only. That covers:
+  - what was asked, seen and sanitized;
+  - what stayed local and what left the browser;
+  - the LLM's proposal versus the local safety decision;
+  - execution, verification and outcome, including blocked, stopped and failed cases.
+- **Prompt/task summary:**
+  - audit the dashboard against the real events;
+  - add only the minimal privacy-safe instrumentation needed;
+  - rebuild the dashboard around the pipeline;
+  - validate it live in visible Chrome, including a blocked safety case;
+  - run the privacy audit and the leak check;
+  - sync the docs. No commit was authorized.
+- **Files changed:**
+  - extension: `extension/src/sidepanel/agent.ts`, `extension/src/sidepanel/main.ts`,
+    `extension/src/telemetry/telemetry.ts`, `extension/src/policy/validator.ts`, `extension/test/policy.test.ts`,
+    `extension/test/egress.test.ts`;
+  - server: `server/app/main.py`, `server/tests/test_server.py`, `server/tests/test_groq_provider.py`;
+  - dashboard: `dashboard/index.html`, `dashboard/style.css`, `dashboard/registry.js`, `dashboard/app.js`,
+    `dashboard/model.js` (new), `dashboard/test/model.test.mjs` (new);
+  - tooling: `scripts/e2e_cdp.mjs`, `Makefile`;
+  - docs: `README.md`, `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/PROGRESS.md`, `docs/ROADMAP.md`,
+    `docs/CHANGELOG.md`.
+- **Missing telemetry discovered:**
+  - no planner provider/model/effort in the stream;
+  - `REQUEST_SENT` had no request id, HTTP status or response time, and is emitted only when the response arrives;
+  - the validator did not report which rules it evaluated, and there was no taint summary;
+  - no event for local placeholder resolution;
+  - an `ask_user` answer was visible only as detection counts;
+  - a denial did not say the action was not executed;
+  - `ERROR` dropped its reason;
+  - the IR had no structural flags.
+  - Not observable at all: server-side retries and repair, and the leak check.
+- **Instrumentation added (all through `Telemetry.emit` → egress client → gate, no new network path):**
+  - `TASK_STARTED.planner`/`limits`;
+  - `EGRESS_CHECK_*.rules_checked`;
+  - `REQUEST_SENT.request_id`/`http_status`/`response_ms`;
+  - `LLM_ACTION_RECEIVED.schema`;
+  - `ACTION_VALIDATED.checks`/`live_checks`/`taint`, backed by a new `checked` list on the validator's allow verdict;
+  - `CONFIRMATION_RESOLVED.result`;
+  - new `USER_ANSWERED` (sanitized answer) and `PLACEHOLDER_RESOLVED` (id and category only);
+  - `ERROR.reason` (sanitized);
+  - `IR_CREATED.interactive[].tag`/`input_type`/`flags`;
+  - `/health` reports `effort`.
+  - Agent behaviour, planner behaviour, action semantics and schemas are unchanged.
+- **Dashboard changes:**
+  - Rebuilt as ES modules: `registry.js` (data), `model.js` (pure reducer), `app.js` (render, read-only transport).
+  - Views: header; pipeline; privacy proof (observed vs by design, with the dashboard's own payload re-check); AI
+    decision vs local safety authority; execution and verification; sanitization flow; agent loop; exact outbound
+    payload per step; DOM → IR inspector; grouped timeline.
+  - Statuses come only from events. Unproven items show as pending, skipped, interrupted or not observed.
+- **Validation/tests:**
+  - `make test`: `tsc` clean, vitest 56/56 (+3), pytest 54/54, dashboard node:test 8/8 (new `make test-dashboard`).
+  - Live in visible Chrome 154 with the real side panel and real Groq, dashboard in a 1440×900 window:
+    - the representative task with values in the text: 3 steps, every stage from events, DONE;
+    - Save + Deny: R1 confirmation, "blocked (user denied)", then STOPPED;
+    - `ask_user`: "answer sanitized to: [ADDRESS_1]";
+    - Stop while planning: INTERRUPTED/STOPPED.
+  - The headless `e2e_cdp.mjs --dashboard` run passed.
+  - Dark theme and 390 px width were checked by screenshot.
+- **Problems discovered:**
+  - the dashboard froze in hidden tabs (`requestAnimationFrame`);
+  - the decision card kept saying "waiting" after the task ended;
+  - a table overflowed at phone width;
+  - the old harness selectors broke.
+- **Fixes applied:** timer-based rendering; outcome-aware decision card; scroll wrapper; harness updated. The
+  decision-card fix was not re-exercised by a live run.
+- **Security/privacy implications:**
+  - Privacy audit: the dashboard makes only GET/SSE requests, has no HTML sinks, logging or storage, and renders
+    with `textContent` only.
+  - The extension still has one `fetch` module. The new events carry placeholders, categories, ids and structural
+    metadata only.
+  - New gate tests show that a leaky resolution or answer event would be stopped.
+  - `make leaks` 0/9 over 36 payloads. The dashboard had 0/9 on every live run. The server console and telemetry
+    had 0 hits.
+- **Documentation updated:** README (dashboard, `/health`, testing, structure, limitations), CLAUDE.md (status,
+  dashboard row, `make test`), PROJECT_CONTEXT, PROGRESS ("M8 dashboard completion", status, decisions, open
+  items), ROADMAP (§1).
+- **Git commit:** none. The M8 work is uncommitted, for the user to review and commit.
+
+## 2026-09-28: v0.1 final hardening pass (bug discovery, fixes, live E2E validation)
+
+- **Phase / milestone:** v0.1 hardening before the M8 checkpoint commit. No new feature phase was started.
+- **Objective:** reproduce the address privacy bugs found in manual testing, audit the whole pipeline for further
+  defects, fix root causes with regression tests, and re-validate live (privacy, execution order, dashboard semantics,
+  failure/safety behaviour).
+- **Bugs found and fixed:**
+  1. *Address under-detection (privacy).* Cue-less task phrasings ("fill address X", "use this address X", "set the
+     address to X", "X as my address", "X in the address field") left the raw address in the outbound task.
+     → A new generic token-boundary address engine (`privacy/detectors.ts`) covers forward and suffix cues,
+     house-number/street shapes and the PIN path. Weak cues count in user-typed text.
+  2. *Address over-masking (privacy/correctness).* Spans swallowed following instructions or other fields, for
+     example `and email is <email>`, `and do not submit`, `into the address box`, `, phone: …`.
+     → The address now stops at instruction words, field labels, other PII, clause-starting connectors (with
+     lookahead) and sentence ends; em dashes and smart quotes are trimmed.
+  3. *Cue-less `ask_user` answers (privacy).* "Shivajinagar, Pune" as an answer to "What is your address?" was not
+     masked. → The sanitizer gets the expected category from the question (`expectedAnswerCategory`); an answer no
+     detector flags is masked whole as ADDRESS or PERSON (yes/no and control answers excepted).
+  4. *Custom ARIA widget values in the IR (invariant 3).* The content of `role=textbox/searchbox/spinbutton/combobox`
+     elements became their accessible name or text (3 of 13 IR-audit values reached the raw IR and the sanitized
+     payload). → `content/dom.ts` and `content/snapshot.ts` treat them as value-bearing, including via
+     `aria-labelledby`. The IR audit now finds 0/13.
+  5. *Consecutive-failure rule bypassed (safety).* Invalid or empty planner responses `continue`d past the
+     2-failures → `ask_user` check. → Fixed in `agent.ts`.
+  6. *Fabricated/duplicate rejection event (dashboard truthfulness).* An invalid planner response emitted two
+     `ACTION_REJECTED` events, one with a made-up `WAIT` action. → One event, with no action.
+  7. *False `ACTION_EXECUTED` after Stop (truthfulness).* A `wait` interrupted by Stop still reported that it had
+     executed. → Checked after the wait.
+  8. *Unreported in-flight action after Stop (truthfulness).* A result arriving after Stop was dropped, although the
+     page had changed. → It is now reported as `ACTION_EXECUTED` with `after_stop: true`, and never verified; nothing
+     follows it.
+  9. *Dashboard current-step vs task-wide ambiguity.* Resolve/Execute/Verify showed SKIPPED on a DONE/ASK_USER
+     step. → Added the "N/A this step" status, a per-card task-wide record, the "Whole task so far" strip and a
+     most-recent-browser-action label; DONE is labelled as the planner's declaration, accepted locally.
+  10. *Dashboard ordering and in-flight states.* Events were applied in arrival order; an execute in flight at panel
+      close showed "not reached"; the Execution card said "waiting…" forever after the task ended. → The reducer
+      orders by `ts` (rebuilding on late arrivals); in-flight actions show "may have run; result not observed";
+      terminal wording is used; SSE subscribes before loading state; the timeline shows milliseconds and the header
+      shows the delivery delay.
+  11. *Transient Groq `json_validate_failed` HTTP 400 killed the task.* → `GroqProvider` retries that code within the
+      existing budget; other 400s are still not retried. Only the error-code identifier is logged.
+  12. *Test hygiene.* Queued telemetry from the new agent tests reached the live relay after `fetch` was un-stubbed
+      (synthetic metadata only). → Tests keep a closed-network `fetch`.
+- **Execution-order finding (observation #4):** the runtime order was correct. Live evidence: the page's own input
+  event follows `ACTION_VALIDATED` and `PLACEHOLDER_RESOLVED` in every step, with 0 violations across the matrix. The
+  apparent inversion was delivery and render aggregation (all of a step's events land within ~320 ms and are painted
+  together; a background tab repaints ~1/s). This was addressed in the dashboard (bug 10), not in the runtime.
+- **Files changed:**
+  - extension: `src/privacy/detectors.ts`, `src/privacy/sanitizer.ts`, `src/sidepanel/agent.ts`,
+    `src/content/dom.ts`, `src/content/snapshot.ts`, `test/privacy.test.ts`, `test/agent.test.ts` (new);
+  - server: `app/providers.py`, `tests/test_groq_provider.py`;
+  - dashboard: `model.js`, `app.js`, `index.html`, `style.css`, `test/model.test.mjs`;
+  - tooling: `scripts/e2e_cdp.mjs`, `scripts/check_leaks.py`;
+  - docs: `README.md`, `CLAUDE.md`, `docs/PROJECT_CONTEXT.md`, `docs/PROGRESS.md`, `docs/ROADMAP.md`,
+    `docs/CHANGELOG.md`.
+- **Validation/tests:**
+  - `make test`: `tsc` clean, vitest 116/116 (4 files), pytest 57/57, dashboard node:test 14/14.
+  - Live matrix with real Groq `openai/gpt-oss-20b`, headless and visible Chrome with the real side panel: see
+    `PROGRESS.md` → "Hardening pass 2026-09-28".
+  - `make leaks`: 0/19 over 91 payloads.
+- **Security/privacy implications:** strictly more masking in task text and answers, and fewer raw values in the IR.
+  The gate's residual scan and T4 now also recognise house-number/street shapes. No new network path and no new
+  dependency.
+- **Git commit:** none (the user reviews and commits).
+
+## 2026-09-29: Dashboard UI/UX redesign (proof console)
+- **Phase / milestone:** presentation pass on the M8 dashboard, after the Phase 1 freeze and the hardening pass. Dashboard
+  only; no agent, extension, server, telemetry or reducer change.
+- **Objective:** make the read-only dashboard read as a deliberate privacy/security observability console that explains
+  VEIL on its own: what was asked, what VEIL saw and kept local, what crossed to the remote planner, what the planner
+  proposed, what local code decided, what the browser did and whether it was verified.
+- **Prompt/task summary:** redesign the dashboard's hierarchy, visual system and wording, browser-first (inspect the real
+  rendering in Chrome through the Chrome DevTools MCP, iterate, re-inspect), keeping it read-only, privacy-safe and
+  semantically identical (current step vs whole task, DONE declared vs verified, N/A vs skipped, interrupted vs
+  failed, not observed).
+- **Files changed:** `dashboard/index.html`, `dashboard/style.css`, `dashboard/app.js`, `dashboard/registry.js`
+  (presentation data only: `PHASES` and `short` stage labels); docs.
+- **Implementation changes:**
+  - Page order follows the story: task + outcome → pipeline (current step) with the whole task → privacy boundary →
+    "The AI proposes. VEIL decides." → "What the browser actually did" → collapsible evidence.
+  - Pipeline: stages grouped into phases on two lanes split by the device boundary; only the planner sits in the
+    hatched remote lane, with "request ↓ / ↑ proposal" at the crossing. The stage happening now is outlined. A stage
+    that is N/A, skipped or pending in the current step says what happened there earlier in the task.
+  - Whole task: inline counts plus the agent loop as a step × stage matrix (one row per step, a status mark per stage,
+    the step result; current step marked).
+  - Privacy boundary: "On this device" (sanitization flow + placeholder table with a fixed-size redaction bar in the
+    "real value" column) and "Sent to the planner" (privacy proof ledger), with the egress gate between them.
+    Relabelled checks, for example "Network privacy check: 0 forbidden keys detected".
+  - Decision chain: remote proposal (dashed, hatched, "Proposes") → local authority ("Decides": checks, taint, risk
+    policy, verdict) → user (confirmation or answer) → result. The user block says "confirmation required" as soon as
+    local validation requires one.
+  - Execution chain: action → resolved locally → execution → settle → verification.
+  - Evidence: outbound payload, DOM → IR and the timeline in `<details>` panels with summary lines (payload and IR
+    collapsed, timeline open).
+  - Outcome card tag names the outcome ("DONE · DECLARED", "STOPPED", "PANEL CLOSED", …) instead of PASSED; the hero
+    explains each outcome in one sentence and says when a step is paused for the user.
+  - Visual system: graphite ground, one accent (placeholder tokens), semantic status colours with a separate hue per
+    state (blocked orange ≠ failed red; stopped/interrupted lilac), uppercase only for status words, system fonts
+    (no web fonts, no new network request), dark and light themes, reduced-motion respected. The blocked glyph is
+    `⊘` (the `⛔` emoji ignored the colour system). An inline empty favicon removes the `favicon.ico` 404.
+  - Stage clock times moved to the stage tooltip (the timeline keeps every event to the millisecond).
+  - "Requests sent to the planner" counts bytes of the observed requests only; a gate pass whose response was never
+    observed (for example in flight at panel close) is stated as such instead of being added to the total.
+- **Validation/tests:** `make test` (tsc clean, vitest 116/116, pytest 57/57, dashboard node:test 14/14); `make leaks`
+  0/19 over 121 payloads after the live runs. Visual review in
+  Chrome through the Chrome DevTools MCP at 1440×900, 1024×768 and 390×844 (dark and light), with no page-wide
+  horizontal overflow. Details, including which states were checked with live telemetry and which with the reducer's
+  test fixtures, are in `PROGRESS.md` → "Dashboard redesign 2026-09-29".
+- **Problems discovered:** a literal "null" printed under the verdict while running and a "now" highlight on the wrong
+  stage after a denial (both in the new rendering code; fixed before completion). Groq's free tier rate-limited every
+  live run after its first planner call during this session (retry hints of 5–17 minutes), so complete live DONE,
+  Save/Deny and ASK_USER runs could not be repeated.
+- **Fixes applied:** see above; no fix outside `dashboard/`.
+- **Security/privacy implications:** none. Same read-only transport (only `GET /telemetry/state` and SSE
+  `/telemetry/stream`), `textContent`-only rendering, no new dependency or network request. The redaction bar is a
+  fixed-size CSS element with no content. The rendered UI showed 0/18 seeded values with every panel expanded.
+- **Documentation updated:** `README.md` (dashboard section), `CLAUDE.md` (status), `docs/PROJECT_CONTEXT.md`,
+  `docs/PROGRESS.md`, this file.
+- **Git commit:** none (the user reviews and commits).
+
+## 2026-09-29: Release-candidate validation and commit of M8, hardening and dashboard redesign
+- **Phase / milestone:** v0.1 release-candidate checkpoint after M8, the hardening pass and the dashboard redesign.
+  Validation only; no new feature.
+- **Objective:** re-validate the accumulated uncommitted work (tests, leak check, diff review, one live smoke run,
+  dashboard check in Chrome) and commit it only if everything passed.
+- **Files changed:** `dashboard/style.css` (one blank line with trailing whitespace, flagged by `git diff --check`;
+  no rendering change); docs: `CLAUDE.md`, `README.md` (leak-check row), `docs/PROJECT_CONTEXT.md`,
+  `docs/PROGRESS.md` (new "Release-candidate validation 2026-09-29", open item 11, a stale dev note about harness
+  output), this file.
+- **Validation/tests:**
+  - `make test`: `tsc` clean, vitest 116/116, pytest 57/57, dashboard node:test 14/14.
+  - Live smoke with real Groq `openai/gpt-oss-20b` (effort `medium`), headless: seeded email + address in the task
+    text → 3 planner calls → both fields typed and verified → DONE; Save not clicked; vault cleared; 0 causal-order
+    violations; dashboard 0/18 canaries.
+  - Dashboard in Chrome (DevTools MCP): 0/20 seeded values with every panel expanded, empty console, only GET/SSE
+    requests, no form controls; SSE switched the open tab to a second (Stop while planning) session without a reload.
+  - `make leaks`: 0/19 over 128 payloads and the latest session's telemetry; server console clean.
+- **Problems discovered:** the trailing-whitespace line; a dev note in `PROGRESS.md` still said the harness prints raw
+  field values (it prints filled/empty only). Both fixed. No code defect was found.
+- **Security/privacy implications:** none; no code change.
+- **Git commit:** "Finalize Veil Phase 1 hardening and dashboard" (the M8, hardening and redesign work plus this
+  validation record).

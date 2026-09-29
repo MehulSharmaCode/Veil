@@ -9,7 +9,14 @@ SIH 2026, problem statement **SIH26171: On-device Visual Perception for Light-we
 >     (09-25), then in a visible Chrome with the real side panel (09-28, tests A–G, `make leaks` 0/9).
 >   - A privacy bug found on 09-25 (a partially masked address was sent to the planner) is fixed. See "Security
 >     incident 2026-09-25 (resolved)" in PROGRESS.
-> - **Next:** M8 polish, then the next phase is discussed with the user.
+> - **M8 (dashboard completion) is done** (2026-09-28): a proof-oriented dashboard driven only by real telemetry.
+> - **Final hardening pass is done** (2026-09-28): address detection, IR/ARIA, Stop/failure and
+>   dashboard-scope fixes, re-validated live (`make leaks` 0/19). See PROGRESS → "Hardening pass 2026-09-28".
+> - **Dashboard UI/UX redesign is done** (2026-09-29, presentation only): two-lane pipeline split by the
+>   device boundary, privacy boundary, "AI proposes, VEIL decides". See PROGRESS → "Dashboard redesign 2026-09-29".
+> - **Release-candidate validation passed** (2026-09-29): tests, `make leaks` 0/19, live Groq smoke run to DONE,
+>   dashboard checked in Chrome; committed as "Finalize Veil Phase 1 hardening and dashboard".
+> - **Next:** discuss the next phase with the user.
 > - **Do not start OCR/vision or other new features on your own.**
 
 VEIL is a Chrome MV3 extension that performs web tasks for a user ("fill my email and address, don't submit")
@@ -53,9 +60,9 @@ side panel (orchestrator, owns vault)            content script (top frame, loca
 |---|---|---|
 | `extension/` | A. VEIL extension (the agent) | TS, esbuild → `extension/dist/`. Generic primitives only. |
 | `demo-site/` | B. Test fixture (:8080) | Static HTML/JS. VEIL must never special-case it. |
-| `dashboard/` | C. Read-only observability app (:8090) | GET `/telemetry/state` + SSE `/telemetry/stream` only. Never controls the agent. |
+| `dashboard/` | C. Read-only proof dashboard (:8090) | GET `/telemetry/state` + SSE `/telemetry/stream` only. Never controls the agent. `model.js` is a pure reducer: a status is shown only if an event proves it. |
 | `server/` | D. FastAPI backend (:8000) | `/health`, `/plan` (planner), `/telemetry/*` relay (separate router, in-memory). |
-| `scripts/` | Tooling | `check_leaks.py` (canary leak check), `e2e_cdp.mjs` (headless Chrome E2E driver). |
+| `scripts/` | Tooling | `check_leaks.py` (canary leak check, 19 seeds), `e2e_cdp.mjs` (Chrome E2E driver). |
 | `docs/` | `PROJECT_CONTEXT.md`, `PROGRESS.md`, `ROADMAP.md`, `CHANGELOG.md` | See "Documentation roles and governance". |
 
 **Extension (`extension/src/`):**
@@ -147,7 +154,7 @@ make setup       # npm install, server/.venv + requirements, copies .env.example
 make dev         # builds extension, then server :8000 + demo :8080 + dashboard :8090 (Ctrl-C stops all)
 make ext         # rebuild extension → extension/dist   (make ext-watch; static/ copied only at start)
 
-make test        # tsc --noEmit + vitest + pytest
+make test        # tsc --noEmit + vitest + pytest + dashboard reducer (node --test)
 make leaks       # scripts/check_leaks.py --telemetry (needs server running for the telemetry part)
 ```
 
@@ -157,10 +164,14 @@ click the toolbar icon to open the side panel.
 Headless E2E (dev tool, no deps, real extension + real backend/LLM, needs servers running and a built extension):
 ```sh
 node scripts/e2e_cdp.mjs --snapshot            # sanitized IR of the demo page
+node scripts/e2e_cdp.mjs --ir-audit            # injected prefilled/ARIA values must not reach the raw IR
 node scripts/e2e_cdp.mjs --exec-check          # executor primitives (harness messages the content script directly)
 node scripts/e2e_cdp.mjs --dashboard --task "…" [--confirm allow|deny] [--answer "…"] [--stop-after-ms N] [--close-panel-after-ms N]
 ```
-It opens `sidepanel.html` as a tab next to the active demo tab (same code path as the real panel), uses a throwaway
+`--headed --real-panel` uses a visible Chrome and the real side panel; other flags (`--shots`, `--stop-when-stage`,
+`--close-after-verified`, `--stale-once`, `--reject-input`, `--inject-attack`) are listed at the top of the script.
+Harness output must report field state as filled/empty only.
+By default it opens `sidepanel.html` as a tab next to the active demo tab (same code path as the real panel), uses a throwaway
 profile and CDP `Extensions.loadUnpacked` (Chrome ≥137 ignores `--load-extension`). The harness may know demo-site
 specifics; the extension may not.
 

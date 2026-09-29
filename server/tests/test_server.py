@@ -148,7 +148,9 @@ def test_provider_error_becomes_502(tmp_path: Path) -> None:
 
 def test_no_provider_configured_is_503(tmp_path: Path) -> None:
     client = TestClient(create_app(settings(tmp_path), None))
-    assert client.get("/health").json()["planner_configured"] is False
+    health = client.get("/health").json()
+    assert health["planner_configured"] is False
+    assert health["provider"] is None and health["model"] is None and health["effort"] is None
     assert client.post("/plan", json=VALID_PAYLOAD).status_code == 503
 
 

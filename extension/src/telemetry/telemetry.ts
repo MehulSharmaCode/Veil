@@ -10,9 +10,11 @@ export type EventType =
   | 'TASK_STARTED' | 'DOM_SNAPSHOT_CREATED' | 'IR_CREATED' | 'PII_DETECTED' | 'SANITIZATION_COMPLETE' | 'VAULT_UPDATED'
   | 'EGRESS_CHECK_PASSED' | 'EGRESS_CHECK_FAILED' | 'EGRESS_BLOCKED' | 'REQUEST_SENT' | 'LLM_ACTION_RECEIVED'
   | 'ACTION_VALIDATED' | 'ACTION_REJECTED' | 'CONFIRMATION_REQUESTED' | 'CONFIRMATION_RESOLVED' | 'ACTION_EXECUTED'
-  | 'VERIFICATION_COMPLETE' | 'TASK_COMPLETED' | 'ERROR';
+  | 'VERIFICATION_COMPLETE' | 'TASK_COMPLETED' | 'ERROR' | 'PLACEHOLDER_RESOLVED' | 'USER_ANSWERED';
 
-export type Stage = 'task' | 'snapshot' | 'ir' | 'sanitize' | 'vault' | 'egress' | 'plan' | 'validate' | 'confirm' | 'execute' | 'verify' | 'done' | 'error';
+export type Stage =
+  | 'task' | 'snapshot' | 'ir' | 'sanitize' | 'vault' | 'egress' | 'plan' | 'validate' | 'confirm' | 'ask' | 'resolve'
+  | 'execute' | 'verify' | 'done' | 'error';
 
 function randomId(n: number, alphabet: string): string {
   const bytes = crypto.getRandomValues(new Uint8Array(n));

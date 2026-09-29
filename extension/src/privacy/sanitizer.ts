@@ -2,7 +2,7 @@
 // task text, ask_user answers, element names/text, labels, aria-*, placeholder, alt, title,
 // page title and URL path — and later OCR lines (source tag 'ocr').
 
-import { detectAll, mergeSpans, PLACEHOLDER_RE, type DetectionCategory, type Span } from './detectors';
+import { detectAll, detectExpectedAnswer, mergeSpans, PLACEHOLDER_RE, type DetectionCategory, type Span } from './detectors';
 import { normalizeText } from './normalize';
 import { __brandSanitized, REDACTED, type SanitizedText } from './sanitized';
 import type { Vault, ValueSource } from './vault';
@@ -19,6 +19,11 @@ export interface SanitizeContext {
    * text must leave this unset so look-alike placeholders are defused.
    */
   keepPlaceholders?: boolean;
+  /**
+   * ask_user answers: the category the question asked for (see `expectedAnswerCategory`). An answer no
+   * detector flags is then masked whole if it has that shape.
+   */
+  expect?: 'ADDRESS' | 'PERSON' | null;
 }
 
 export interface Detection {
@@ -44,7 +49,11 @@ export class Sanitizer {
     if (typeof raw !== 'string' || raw === '') return { text: __brandSanitized(''), detections: [] };
     try {
       const t = ctx.keepPlaceholders ? normalizeText(raw) : defusePlaceholders(normalizeText(raw));
-      const spans = mergeSpans([...detectAll(t), ...this.knownValueSpans(t)]);
+      // Text the user typed (task, answers) is an instruction to VEIL: weak address cues count there.
+      const userText = ctx.source === 'task' || ctx.source === 'user_answer';
+      let found = [...detectAll(t, { userText }), ...this.knownValueSpans(t)];
+      if (!found.length && ctx.expect) found = detectExpectedAnswer(t, ctx.expect);
+      const spans = mergeSpans(found);
       const detections: Detection[] = [];
       let out = '';
       let pos = 0;

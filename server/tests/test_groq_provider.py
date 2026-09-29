@@ -79,7 +79,7 @@ def test_settings_read_groq_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_create_app_builds_groq_provider(tmp_path: Path) -> None:
     s = Settings(FAKE_KEY, "openai/gpt-oss-20b", "medium", False, tmp_path / "p.jsonl", [])
     health = TestClient(create_app(s)).get("/health").json()
-    assert health == {"status": "ok", "planner_configured": True, "provider": "groq", "model": "openai/gpt-oss-20b"}
+    assert health == {"status": "ok", "planner_configured": True, "provider": "groq", "model": "openai/gpt-oss-20b", "effort": "medium"}
 
 
 def test_budget_fits_extension_deadline() -> None:
@@ -236,6 +236,33 @@ def test_error_messages_never_echo_response_body() -> None:
     with pytest.raises(ProviderError) as e:
         call(p)
     assert str(e.value) == "LLM provider error (HTTP 400)"
+    assert len(seen) == 1
+
+
+def test_schema_validation_400_is_retried_within_budget() -> None:
+    # Groq answers 400 json_validate_failed when the model's output misses the strict schema: a
+    # generation glitch (found live 2026-09-28), retried instead of failing the whole task.
+    bad = httpx.Response(400, json={"error": {"code": "json_validate_failed", "message": "x", "failed_generation": "SECRET-ECHO"}})
+    responses = [bad, httpx.Response(200, json=completion(GOOD))]
+    p, seen, _ = make(lambda r: responses.pop(0))
+    assert call(p) == GOOD and len(seen) == 2
+
+
+def test_schema_validation_400_every_time_fails_without_echo(caplog: pytest.LogCaptureFixture) -> None:
+    body = {"error": {"code": "json_validate_failed", "message": "schema", "failed_generation": "SECRET-ECHO [EMAIL_1]"}}
+    p, seen, clock = make(lambda r: httpx.Response(400, json=body))
+    with caplog.at_level("WARNING"), pytest.raises(ProviderError) as e:
+        call(p)
+    assert str(e.value).startswith("LLM output failed the response schema (gave up")
+    assert len(seen) == 3 and clock.t - 1000.0 <= CALL_BUDGET_S
+    assert "SECRET-ECHO" not in str(e.value) and "SECRET-ECHO" not in caplog.text
+    assert "(json_validate_failed)" in caplog.text
+
+
+def test_other_400_codes_are_not_retried() -> None:
+    p, seen, _ = make(lambda r: httpx.Response(400, json={"error": {"code": "invalid_request_error Robert'); DROP", "message": "m"}}))
+    with pytest.raises(ProviderError, match=r"^LLM provider error \(HTTP 400\)$"):
+        call(p)
     assert len(seen) == 1
 
 

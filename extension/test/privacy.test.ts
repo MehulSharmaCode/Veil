@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { isAadhaar, isCard, isPan, luhnValid, verhoeffValid } from '../src/privacy/checksums';
-import { classifyDigits, detect, detectAll } from '../src/privacy/detectors';
+import { classifyDigits, detect, detectAll, expectedAnswerCategory } from '../src/privacy/detectors';
 import { digitsOnly, normalizeText, normalizeValue } from '../src/privacy/normalize';
 import { Sanitizer, scanStrict } from '../src/privacy/sanitizer';
 import { Vault } from '../src/privacy/vault';
@@ -206,5 +206,121 @@ describe('sanitizer + vault', () => {
     vault.clear();
     expect(vault.size).toBe(0);
     expect(vault.secretForms()).toEqual({ text: [], digits: [] });
+  });
+});
+
+// ---- address detection hardening (2026-09-28) ------------------------------------------------------
+// Synthetic values only. Each case: task text → exact sanitized text + the exact vaulted values.
+
+describe('address detection: coverage and boundaries in task text', () => {
+  const E1 = 'mehul.test@example.com';
+  const ADDR = '12 MG Road, Shivajinagar, Pune';
+  const cases: [string, string, Record<string, string>][] = [
+    // cue variants
+    [`my address: ${ADDR} 411005`, 'my address: [ADDRESS_1]', { '[ADDRESS_1]': `${ADDR} 411005` }],
+    [`my address is ${ADDR}`, 'my address is [ADDRESS_1]', { '[ADDRESS_1]': ADDR }],
+    [`address: ${ADDR} and email is ${E1}`, 'address: [ADDRESS_1] and email is [EMAIL_1]', { '[ADDRESS_1]': ADDR, '[EMAIL_1]': E1 }],
+    [`with address ${ADDR} please`, 'with address [ADDRESS_1] please', { '[ADDRESS_1]': ADDR }],
+    ['use this address 45 Park Street, Kolkata for the address field', 'use this address [ADDRESS_1] for the address field', { '[ADDRESS_1]': '45 Park Street, Kolkata' }],
+    ['enter this address 45 Park Street, Kolkata 700016 and stop', 'enter this address [ADDRESS_1] and stop', { '[ADDRESS_1]': '45 Park Street, Kolkata 700016' }],
+    ['put this as my address: Flat 3B, Sunrise Apartments, Andheri West, Mumbai', 'put this as my address: [ADDRESS_1]', { '[ADDRESS_1]': 'Flat 3B, Sunrise Apartments, Andheri West, Mumbai' }],
+    ['Set the address to 88 Nehru Nagar, Bhopal then fill alternate email with alt.user@example.org', 'Set the address to [ADDRESS_1] then fill alternate email with [EMAIL_1]', { '[ADDRESS_1]': '88 Nehru Nagar, Bhopal', '[EMAIL_1]': 'alt.user@example.org' }],
+    [`Fill the address field with address ${ADDR} then save`, 'Fill the address field with address [ADDRESS_1] then save', { '[ADDRESS_1]': ADDR }],
+    // the value precedes the cue
+    ['Use 88 Nehru Nagar, Bhopal as my address and do not submit', 'Use [ADDRESS_1] as my address and do not submit', { '[ADDRESS_1]': '88 Nehru Nagar, Bhopal' }],
+    [`Enter ${ADDR} 411005 in the address field and do not submit`, 'Enter [ADDRESS_1] in the address field and do not submit', { '[ADDRESS_1]': `${ADDR} 411005` }],
+    ['Put 12 MG Road Shivajinagar Pune into the address field', 'Put [ADDRESS_1] into the address field', { '[ADDRESS_1]': '12 MG Road Shivajinagar Pune' }],
+    ['Use Andheri West, Mumbai as my address', 'Use [ADDRESS_1] as my address', { '[ADDRESS_1]': 'Andheri West, Mumbai' }],
+    // no PIN, lowercase, uppercase, no commas
+    [`fill address shivajinagar pune and email ${E1}`, 'fill address [ADDRESS_1] and email [EMAIL_1]', { '[ADDRESS_1]': 'shivajinagar pune', '[EMAIL_1]': E1 }],
+    ['fill address with 12 mg road, shivajinagar, pune and alternate email with alt.user@example.org', 'fill address with [ADDRESS_1] and alternate email with [EMAIL_1]', { '[ADDRESS_1]': '12 mg road, shivajinagar, pune', '[EMAIL_1]': 'alt.user@example.org' }],
+    ['address 12 MG ROAD, SHIVAJINAGAR, PUNE. email MEHUL.TEST@EXAMPLE.COM', 'address [ADDRESS_1]. email [EMAIL_1]', { '[ADDRESS_1]': '12 MG ROAD, SHIVAJINAGAR, PUNE', '[EMAIL_1]': 'MEHUL.TEST@EXAMPLE.COM' }],
+    [`Fill address 12 MG Road Shivajinagar Pune and email ${E1} do not submit`, 'Fill address [ADDRESS_1] and email [EMAIL_1] do not submit', { '[ADDRESS_1]': '12 MG Road Shivajinagar Pune', '[EMAIL_1]': E1 }],
+    // followed by another instruction / field / sentence
+    [`Type my address ${ADDR} into the address box, then fill email ${E1}, do not click save`, 'Type my address [ADDRESS_1] into the address box, then fill email [EMAIL_1], do not click save', { '[ADDRESS_1]': ADDR, '[EMAIL_1]': E1 }],
+    [`Fill my email with ${E1} and my address with ${ADDR}. Do not submit the form.`, 'Fill my email with [EMAIL_1] and my address with [ADDRESS_1]. Do not submit the form.', { '[EMAIL_1]': E1, '[ADDRESS_1]': ADDR }],
+    [`Fill my address with ${ADDR} and my phone with 9876543210`, 'Fill my address with [ADDRESS_1] and my phone with [PHONE_1]', { '[ADDRESS_1]': ADDR, '[PHONE_1]': '9876543210' }],
+    [`Address: ${ADDR}, phone: 9876543210, email: ${E1}`, 'Address: [ADDRESS_1], phone: [PHONE_1], email: [EMAIL_1]', { '[ADDRESS_1]': ADDR, '[PHONE_1]': '9876543210', '[EMAIL_1]': E1 }],
+    ['Fill my email and address. My address is House No. 5, Sector 21, Gurugram, Haryana 122001. Then stop.', 'Fill my email and address. My address is [ADDRESS_1]. Then stop.', { '[ADDRESS_1]': 'House No. 5, Sector 21, Gurugram, Haryana 122001' }],
+    [`address - 14, Lake View Colony, Hyderabad; email ${E1}`, 'address - [ADDRESS_1]; email [EMAIL_1]', { '[ADDRESS_1]': '14, Lake View Colony, Hyderabad', '[EMAIL_1]': E1 }],
+    ['Fill my address: 5, Lake Road, New Delhi 110001 and my phone 9876543210 and don\'t save', 'Fill my address: [ADDRESS_1] and my phone [PHONE_1] and don\'t save', { '[ADDRESS_1]': '5, Lake Road, New Delhi 110001', '[PHONE_1]': '9876543210' }],
+    // a connector followed by more address stays inside; one followed by a new clause ends it
+    ['address 12 MG Road and 5th Cross, Pune then save', 'address [ADDRESS_1] then save', { '[ADDRESS_1]': '12 MG Road and 5th Cross, Pune' }],
+    ['my address is flat 4b sai apartments near city mall pune 411005 and my name is priya nair', 'my address is [ADDRESS_1] and my name is [PERSON_1]', { '[ADDRESS_1]': 'flat 4b sai apartments near city mall pune 411005', '[PERSON_1]': 'priya nair' }],
+    // framed by dashes; lowercase prose with several categories
+    ['Fill my address — 9/2 Residency Rd., Bengaluru — and stop', 'Fill my address — [ADDRESS_1] — and stop', { '[ADDRESS_1]': '9/2 Residency Rd., Bengaluru' }],
+    [
+      'my name is priya nair, my pan is BNZPM2501F and my phone is +91 91234 56780. fill my address with flat 4b sai apartments near city mall pune and the alternate email with Priya.Nair.Test@Example.org. do not submit.',
+      'my name is [PERSON_1], my pan is [PAN_1] and my phone is [PHONE_1]. fill my address with [ADDRESS_1] and the alternate email with [EMAIL_1]. do not submit.',
+      { '[PERSON_1]': 'priya nair', '[PAN_1]': 'BNZPM2501F', '[PHONE_1]': '+91 91234 56780', '[ADDRESS_1]': 'flat 4b sai apartments near city mall pune', '[EMAIL_1]': 'Priya.Nair.Test@Example.org' },
+    ],
+    // no value at all: nothing is invented
+    ['Fill my email and address. Do not submit.', 'Fill my email and address. Do not submit.', {}],
+    ['Fill the address and email fields. Do not submit.', 'Fill the address and email fields. Do not submit.', {}],
+    ['Please send the letter to my address', 'Please send the letter to my address', {}],
+  ];
+  it.each(cases)('%s', (input, expected, vaulted) => {
+    const { vault, s } = mk();
+    const out = s.sanitize(input, task);
+    expect(out).toBe(expected);
+    expect(Object.fromEntries(vault.metadata().map((m) => [m.id, vault.getEntry(m.id)!.value]))).toEqual(vaulted);
+    // what leaves is residual-clean under the gate's strict scan
+    expect(scanStrict(out)).toEqual([]);
+  });
+});
+
+describe('address detection: page text is not over-masked; cue-less shapes are masked whole', () => {
+  const pageCases: [string, string][] = [
+    ['Email address', 'Email address'],
+    ['Enter your email address to receive updates', 'Enter your email address to receive updates'],
+    ['Address is required', 'Address is required'],
+    ['Address: required', 'Address: required'],
+    ['Please enter your address below', 'Please enter your address below'],
+    ['Update your address details in the profile section', 'Update your address details in the profile section'],
+    ['Enter the address in the address field', 'Enter the address in the address field'],
+    ['IP address 10.0.0.1 is blocked', 'IP address 10.0.0.1 is blocked'],
+    ['Unit 3 of the course is due', 'Unit 3 of the course is due'],
+    ['Get flat 50% off today', 'Get flat 50% off today'],
+    ['Phase 2 rollout completes next week', 'Phase 2 rollout completes next week'],
+    ['Visit us at 5 Park Street, Kolkata 700016 for help', 'Visit us at [ADDRESS_1] for help'],
+    ['Our office: 22 Residency Road, Bengaluru 560025. Call us.', 'Our office: [ADDRESS_1]. Call us.'],
+    ['Shipping to Flat 12, Green Park Apartments, Delhi', 'Shipping to [ADDRESS_1]'],
+  ];
+  it.each(pageCases)('%s', (input, expected) => {
+    const { s } = mk();
+    expect(s.sanitize(input, page)).toBe(expected);
+  });
+  it('an LLM that proposes typing a raw address as literal text is caught by the strict scan (T4)', () => {
+    expect(scanStrict('12 MG Road, Shivajinagar, Pune').length).toBeGreaterThan(0);
+    expect(scanStrict('Flat 3B, Sunrise Apartments, Andheri West').length).toBeGreaterThan(0);
+  });
+});
+
+describe('ask_user answers: the question tells the sanitizer what a cue-less answer holds', () => {
+  const answer = (q: string, a: string) => {
+    const { vault, s } = mk();
+    const out = s.sanitize(a, { source: 'user_answer', origin: 'http://localhost:8080', expect: expectedAnswerCategory(q) });
+    return { out, values: vault.metadata().map((m) => vault.getEntry(m.id)!.value) };
+  };
+  it('maps questions to expected categories; yes/no questions expect nothing', () => {
+    expect(expectedAnswerCategory('What is your address?')).toBe('ADDRESS');
+    expect(expectedAnswerCategory('Please provide your full name.')).toBe('PERSON');
+    expect(expectedAnswerCategory('Should I fill the address field?')).toBeNull();
+    expect(expectedAnswerCategory('What is your email address?')).toBeNull();
+    expect(expectedAnswerCategory('What should I do next?')).toBeNull();
+  });
+  it('masks cue-less, PIN-less address and name answers whole', () => {
+    expect(answer('What is your address?', 'Shivajinagar, Pune')).toEqual({ out: '[ADDRESS_1]', values: ['Shivajinagar, Pune'] });
+    expect(answer('Please provide your address.', 'shivajinagar pune')).toEqual({ out: '[ADDRESS_1]', values: ['shivajinagar pune'] });
+    expect(answer('What is your address?', '12 MG Road, Shivajinagar, Pune')).toEqual({ out: '[ADDRESS_1]', values: ['12 MG Road, Shivajinagar, Pune'] });
+    expect(answer('What is your full name?', 'priya nair')).toEqual({ out: '[PERSON_1]', values: ['priya nair'] });
+  });
+  it('leaves control answers alone and never merges other PII into the address', () => {
+    expect(answer('Which address should I use?', 'skip').out).toBe('skip');
+    expect(answer('Should I fill the address field?', 'yes').out).toBe('yes');
+    expect(answer('Please provide your address.', 'my address is 12 MG Road, Pune and email a@b.co')).toEqual({
+      out: 'my address is [ADDRESS_1] and email [EMAIL_1]',
+      values: ['12 MG Road, Pune', 'a@b.co'],
+    });
   });
 });

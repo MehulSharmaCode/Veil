@@ -6,6 +6,7 @@ from __future__ import annotations
 import copy
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Protocol
@@ -121,7 +122,8 @@ class GroqProvider:
             if r.status_code == 200:
                 return self._extract(r)
 
-            log.warning("groq attempt %d: HTTP %d", attempt, r.status_code)
+            code = _error_code(r)
+            log.warning("groq attempt %d: HTTP %d%s", attempt, r.status_code, f" ({code})" if code else "")
             if r.status_code == 401:
                 raise ProviderError("LLM provider rejected the API key (check GROQ_API_KEY in server/.env)")
             if r.status_code == 429:
@@ -134,6 +136,11 @@ class GroqProvider:
             if r.status_code in (498, 500, 502, 503, 504):
                 last_error = f"LLM provider error (HTTP {r.status_code})"
                 self._wait(BACKOFF_S, deadline)
+                continue
+            if r.status_code == 400 and code == "json_validate_failed":
+                # The model's output failed Groq's strict-schema check: a generation glitch, not a bad
+                # request. Retry within the same budget (the body holds model output: never echoed).
+                last_error = "LLM output failed the response schema"
                 continue
             # 400/403/404/413/422 etc.: not retryable. Never echo the body (it may contain model output).
             raise ProviderError(f"LLM provider error (HTTP {r.status_code})")
@@ -254,6 +261,19 @@ def restore_merged_variants(raw: str, merged: dict[str, set[str]]) -> str:
         return {k: walk(v) for k, v in node.items() if not (keys and k in keys and v is None)}
 
     return json.dumps(walk(data), ensure_ascii=False)
+
+
+_CODE_RE = re.compile(r"^[a-z_]{1,40}$")
+
+
+def _error_code(r: httpx.Response) -> str | None:
+    """Groq's machine-readable `error.code` (an identifier like "json_validate_failed"), else None.
+    Only an identifier-shaped value is returned; nothing else from the body is read or kept."""
+    try:
+        code = r.json().get("error", {}).get("code")
+    except (ValueError, AttributeError):
+        return None
+    return code if isinstance(code, str) and _CODE_RE.match(code) else None
 
 
 def _retry_after(r: httpx.Response) -> float | None:

@@ -3,68 +3,118 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>VEIL Observatory</title>
+  <title>VEIL proof console</title>
+  <link rel="icon" href="data:," />
   <link rel="stylesheet" href="style.css" />
 </head>
 <body>
-  <header class="hdr">
-    <div>
-      <div class="title">VEIL <span>observatory</span></div>
-      <div class="sub">Read-only view of real VEIL events. Everything shown here already passed the extension's egress gate: placeholders and categories only.</div>
-    </div>
-    <div class="hdr-right">
-      <span id="conn" class="badge muted">connecting…</span>
-      <span id="privacy" class="badge muted" title="Egress gate results for planner payloads">egress: –</span>
-    </div>
+  <header class="bar">
+    <div class="brand"><span class="mark">VEIL</span><span class="brand-sub">proof console</span></div>
+    <p class="bar-note">Read-only view of real VEIL telemetry. Every event already passed the extension's egress gate, so you see placeholders, categories and counts, never values.</p>
+    <span id="conn" class="conn">connecting…</span>
   </header>
 
-  <section class="panel wide">
-    <h2>Current task <small id="session" class="muted"></small></h2>
-    <div id="task" class="task mono">No task yet. Start one from the VEIL side panel.</div>
-    <ol id="stages" class="stages"></ol>
-  </section>
-
-  <main class="grid">
-    <section class="panel">
-      <h2>DOM / IR summary</h2>
-      <dl id="ir" class="kv"></dl>
-      <div id="regions" class="small muted"></div>
+  <main>
+    <!-- Tier 1: what was asked, and how it ended -->
+    <section class="story" aria-label="Task and outcome">
+      <div class="ask">
+        <h1 class="ask-h">Task, as it left the browser</h1>
+        <p id="task" class="ask-text">No task yet. Start one from the VEIL side panel.</p>
+        <p class="ask-note">Sensitive values in the task were replaced on this device before anything was sent.</p>
+        <dl class="facts">
+          <div><dt>Step</dt><dd id="hStep">–</dd></div>
+          <div><dt>Stage</dt><dd id="hStage">–</dd></div>
+          <div><dt>Elapsed</dt><dd id="hElapsed">–</dd></div>
+          <div><dt>Planner</dt><dd id="hPlanner">–</dd></div>
+          <div><dt>Session</dt><dd id="hSession" class="mono">–</dd></div>
+        </dl>
+      </div>
+      <div class="verdict">
+        <div id="overall" class="state s-muted">IDLE</div>
+        <p id="overallWhy" class="verdict-why"></p>
+      </div>
     </section>
 
-    <section class="panel">
-      <h2>Detected categories</h2>
-      <div id="categories" class="chips"></div>
-      <h2 class="gap">Vault <small class="muted">(in the extension's memory)</small></h2>
-      <div id="vaultStatus" class="small"></div>
-      <table class="tbl"><thead><tr><th>Placeholder</th><th>Category</th><th>Source</th><th>Value</th></tr></thead><tbody id="placeholders"></tbody></table>
+    <!-- Tier 1: the pipeline for the current step, then the whole task -->
+    <section class="band band-flow" aria-labelledby="pipeH">
+      <div class="band-h">
+        <h2 id="pipeH">Pipeline <span id="pipeStep" class="h-aside"></span></h2>
+        <p id="pipeScope" class="lede"></p>
+      </div>
+      <div id="pipeline" class="lanes"></div>
+      <div class="whole" aria-labelledby="wholeH">
+        <div class="whole-h">
+          <h3 id="wholeH">Whole task so far</h3>
+          <div id="taskSummary" class="task-summary"></div>
+        </div>
+        <div id="steps"></div>
+      </div>
     </section>
 
-    <section class="panel">
-      <h2>Egress gate</h2>
-      <div id="egress" class="small"></div>
-      <h2 class="gap">LLM action</h2>
-      <div id="llm" class="mono small"></div>
+    <!-- Tier 2: the privacy boundary -->
+    <section class="band" aria-labelledby="privH">
+      <div class="band-h">
+        <h2 id="privH">What stayed local, and what left the browser</h2>
+        <p class="lede">Real values are swapped for typed placeholders on this device. Only the placeholder crosses the egress gate to the remote planner; the value stays in the local vault.</p>
+      </div>
+      <div class="boundary">
+        <div class="bside bside-local">
+          <h3 class="bside-h"><span class="lane-dot local"></span>On this device <span class="h-aside">sanitization</span></h3>
+          <div id="sanitize"></div>
+        </div>
+        <div class="bgate" aria-hidden="true"><span class="bgate-label">egress gate</span></div>
+        <div class="bside bside-remote">
+          <h3 class="bside-h"><span class="lane-dot remote"></span>Sent to the planner <span class="h-aside">privacy proof</span></h3>
+          <div id="privacy"></div>
+        </div>
+      </div>
     </section>
 
-    <section class="panel">
-      <h2>Local validation</h2>
-      <div id="validation" class="small"></div>
-      <h2 class="gap">Execution &amp; verification</h2>
-      <div id="execution" class="small"></div>
+    <!-- Tier 2: AI proposal vs local authority -->
+    <section class="band" aria-labelledby="decH">
+      <div class="band-h">
+        <h2 id="decH">The AI proposes. VEIL decides. <span id="decStep" class="h-aside"></span></h2>
+        <p class="lede">The remote planner only suggests one action. Local code checks it, asks you when it is risky, and has the final say.</p>
+      </div>
+      <div id="decision"></div>
     </section>
 
-    <section class="panel wide">
-      <h2>Sanitized outbound payload <small class="muted">(exactly as it crossed the egress boundary)</small></h2>
-      <pre id="payload" class="mono payload">–</pre>
+    <!-- Tier 2: execution + verification -->
+    <section class="band" aria-labelledby="exH">
+      <div class="band-h">
+        <h2 id="exH">What the browser actually did <span id="exStep" class="h-aside"></span></h2>
+        <p class="lede">A proposal is not an action. This is the most recent action that really reached the page, and whether its result was checked.</p>
+      </div>
+      <div id="execution"></div>
     </section>
 
-    <section class="panel wide">
-      <h2>Live event timeline</h2>
-      <ol id="timeline" class="timeline"></ol>
+    <!-- Tier 3: technical evidence -->
+    <section class="band band-evidence" aria-labelledby="evH">
+      <div class="band-h">
+        <h2 id="evH">Inspect the evidence</h2>
+        <p class="lede">The raw records behind the views above.</p>
+      </div>
+      <details class="ev">
+        <summary><span class="ev-t">Outbound payload</span><span id="payloadSum" class="ev-s"></span></summary>
+        <div class="ev-body">
+          <div class="ev-tools"><span class="ev-tools-l">Exactly what crossed the egress boundary, per request</span><span id="payloadTabs" class="tabs"></span></div>
+          <div id="payload"></div>
+        </div>
+      </details>
+      <details class="ev">
+        <summary><span class="ev-t">What VEIL saw: DOM → IR</span><span id="irSum" class="ev-s"></span></summary>
+        <div class="ev-body"><div id="ir"></div></div>
+      </details>
+      <details class="ev" open>
+        <summary><span class="ev-t">Event timeline</span><span id="tlCount" class="ev-s"></span></summary>
+        <div class="ev-body">
+          <p class="ev-note">In the order events happened, by the side panel's clock (ms). Click a row for its sanitized data.</p>
+          <ol id="timeline" class="timeline"></ol>
+        </div>
+      </details>
     </section>
   </main>
 
-  <script src="registry.js"></script>
-  <script src="app.js"></script>
+  <script type="module" src="app.js"></script>
 </body>
 </html>

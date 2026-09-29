@@ -32,6 +32,18 @@ SEEDS: dict[str, str] = {
     "task:address-street": "12 MG Road",
     "task:address-locality": "Shivajinagar",
     "task:pincode": "411005",
+    # Adversarial set (2026-09-28 hardening): lowercase prose, +91 phone, PAN, a cue-less PIN-less
+    # address, mixed-case email, and the IR-audit fixture values that must never leave the page.
+    "adv:name": "priya nair",
+    "adv:pan": "BNZPM2501F",
+    "adv:phone": "+91 91234 56780",
+    "adv:address": "flat 4b sai apartments near city mall pune",
+    "adv:address-part": "sai apartments",
+    "adv:email": "Priya.Nair.Test@Example.org",
+    "adv:answer-locality": "Andheri West",
+    "ir:aria-textbox": "Nightjar Canary Value",
+    "ir:prefilled-email": "zq.canary@example.invalid",
+    "ir:prefilled-name": "Zephyrine Quillfeather",
 }
 MIN_DIGITS = 6
 

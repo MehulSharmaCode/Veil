@@ -7,7 +7,7 @@ import { classifyField } from '../shared/fieldCategory';
 import type { ElementState, RawElement, RawRegion, RawSnapshot, RegionKind } from '../shared/ir';
 import {
   accessibleName, collapse, fingerprint, headingLevel, idFor, implicitRole, inViewport, isEditingHost, isHidden,
-  isInteractive, isOccluded, labelText, rectOf,
+  isInteractive, isOccluded, isValueBearing, labelText, rectOf, VALUE_ROLES,
 } from './dom';
 
 const SKIP_TAGS = new Set(['script', 'style', 'template', 'noscript', 'head', 'meta', 'link', 'iframe', 'object', 'embed']);
@@ -19,6 +19,9 @@ function hasValue(el: Element): boolean {
   if (el instanceof HTMLTextAreaElement) return el.value !== '';
   if (el instanceof HTMLSelectElement) return el.selectedIndex > 0 || (el.selectedIndex === 0 && el.value !== '' && !!el.options[0]?.value);
   if (isEditingHost(el)) return ((el as HTMLElement).innerText ?? '').trim() !== '';
+  // Custom ARIA widgets: aria-valuenow / aria-valuetext, or their text content (read as a boolean only).
+  const role = el.getAttribute('role')?.trim().split(/\s+/)[0]?.toLowerCase();
+  if (role && VALUE_ROLES.has(role)) return el.hasAttribute('aria-valuenow') || el.hasAttribute('aria-valuetext') || (el.textContent ?? '').trim() !== '';
   return false;
 }
 
@@ -135,9 +138,9 @@ export function takeSnapshot(): RawSnapshot {
 
     const role = implicitRole(el);
     const name = interactive ? accessibleName(el) : labelText(el);
-    const editable = interactive && (tag === 'textarea' || tag === 'select' || isEditingHost(el) || (tag === 'input' && !['button', 'submit', 'reset', 'image', 'checkbox', 'radio'].includes((el as HTMLInputElement).type)));
-    // Visible text: captions for buttons/links; never the content of value-bearing controls.
-    const text = interactive ? (editable ? '' : labelText(el)) : name;
+    // Visible text: captions for buttons/links; never the content of value-bearing controls (native
+    // fields, contenteditable hosts and ARIA textbox/searchbox/spinbutton/combobox widgets).
+    const text = interactive ? (isValueBearing(el) ? '' : labelText(el)) : name;
     const entry: RawElement = {
       id: idFor(el),
       kind: interactive ? 'interactive' : 'heading',
